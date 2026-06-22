@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClaimCheck — LoRA Audit Report</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --blue:    #1565c0;
+      --blue-dk: #0d47a1;
+      --blue-lt: #e8edf7;
+      --red:     #c62828;
+      --red-lt:  #fdecea;
+      --orange:  #e65100;
+      --ora-lt:  #fff3e0;
+      --green:   #2e7d32;
+      --grn-lt:  #e8f5e9;
+      --gray:    #555;
+      --bdr:     #dde3ec;
+      --bg:      #f5f7fa;
+      --bg2:     #ffffff;
+      --text:    #1a1a1a;
+      --nav-h:   52px;
+    }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--text);
+      line-height: 1.6;
+      background: #eef0f4;
+      padding-top: var(--nav-h);
+    }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: var(--blue-lt); padding: .1rem .35rem;
+      border-radius: 3px; font-size: .82em; font-family: 'Consolas', 'Courier New', monospace;
+    }
+
+    /* ── Sticky nav ── */
+    .top-nav {
+      position: fixed; top: 0; left: 0; right: 0; height: var(--nav-h);
+      background: var(--blue-dk); color: #fff; z-index: 1000;
+      display: flex; align-items: center; padding: 0 1.2rem; gap: 0;
+      box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    }
+    .top-nav .brand { font-weight: 700; font-size: 1rem; margin-right: 1.5rem; white-space: nowrap; flex-shrink: 0; }
+    .top-nav .brand span { font-weight: 300; opacity: .7; }
+    .nav-links { display: flex; gap: .15rem; overflow-x: auto; flex: 1; }
+    .nav-links a {
+      color: rgba(255,255,255,.8); padding: .3rem .65rem; border-radius: 4px;
+      font-size: .8rem; white-space: nowrap; transition: background .15s;
+    }
+    .nav-links a:hover { background: rgba(255,255,255,.15); color: #fff; text-decoration: none; }
+    .nav-links a.active { background: rgba(255,255,255,.22); color: #fff; font-weight: 600; }
+    .nav-right { margin-left: auto; font-size: .72rem; opacity: .55; white-space: nowrap; padding-left: .8rem; flex-shrink: 0; }
+
+    /* ── Page wrapper ── */
+    .page { max-width: 1200px; margin: 0 auto; padding: 1.5rem 1.5rem 5rem; }
+
+    /* ── Report header ── */
+    .report-header {
+      background: linear-gradient(135deg, var(--blue-dk) 0%, #1976d2 100%);
+      color: #fff; padding: 2rem 2rem 1.6rem; border-radius: 10px;
+      margin-bottom: 1.5rem; box-shadow: 0 4px 20px rgba(13,71,161,.35);
+    }
+    .report-header h1 { font-size: 1.55rem; font-weight: 700; margin-bottom: .35rem; }
+    .report-header .subtitle { font-size: .82rem; opacity: .7; }
+
+    /* ── Section ── */
+    section { margin-bottom: 2rem; scroll-margin-top: calc(var(--nav-h) + 10px); }
+    section > h2 {
+      font-size: 1.15rem; font-weight: 700; color: var(--blue);
+      border-bottom: 2px solid var(--blue-lt); padding-bottom: .35rem;
+      margin-bottom: 1rem;
+    }
+
+    /* ── Exec summary ── */
+    .exec-card {
+      background: var(--bg2); border-left: 4px solid var(--blue);
+      border-radius: 0 8px 8px 0; padding: 1.2rem 1.5rem;
+      box-shadow: 0 1px 5px rgba(0,0,0,.06);
+    }
+    .exec-card h2 { color: var(--blue); font-size: 1rem; border: none; margin: .9rem 0 .3rem; }
+    .exec-card p  { margin: .4rem 0; font-size: .92rem; }
+    .exec-card ul { padding-left: 1.4rem; margin: .4rem 0; }
+    .exec-card li { margin: .25rem 0; font-size: .92rem; }
+    .exec-card table { font-size: .85rem; width: auto; margin: .5rem 0; }
+    .exec-card table th { background: var(--blue); }
+    .exec-card table td { border: 1px solid var(--bdr); padding: .3rem .6rem; }
+
+    /* ── Stats grid ── */
+    .stats-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+      gap: .9rem; margin-bottom: 1.4rem;
+    }
+    .stat-card {
+      background: var(--bg2); border: 1px solid var(--bdr); border-radius: 8px;
+      padding: 1rem 1.2rem; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.05);
+      transition: box-shadow .2s;
+    }
+    .stat-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.1); }
+    .stat-card .num { font-size: 2.2rem; font-weight: 700; line-height: 1.1; }
+    .stat-card .lbl { font-size: .74rem; color: var(--gray); margin-top: .25rem; text-transform: uppercase; letter-spacing: .04em; }
+    .stat-card .num.blue   { color: var(--blue); }
+    .stat-card .num.red    { color: var(--red); }
+    .stat-card .num.orange { color: var(--orange); }
+    .stat-card .num.green  { color: var(--green); }
+    .stat-card .num.gray   { color: var(--gray); }
+
+    /* ── Charts grid ── */
+    .charts-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem;
+    }
+    .chart-card {
+      background: var(--bg2); border: 1px solid var(--bdr); border-radius: 8px;
+      padding: 1rem 1.2rem; box-shadow: 0 1px 4px rgba(0,0,0,.05);
+    }
+    .chart-card h3 {
+      font-size: .75rem; font-weight: 700; color: var(--gray);
+      margin-bottom: .5rem; text-transform: uppercase; letter-spacing: .05em;
+    }
+    .chart-wide { grid-column: 1 / -1; }
+    @media (max-width: 680px) { .charts-grid { grid-template-columns: 1fr; } .chart-wide { grid-column: auto; } }
+
+    /* ── Tables ── */
+    .tbl-wrap { overflow-x: auto; border-radius: 6px; border: 1px solid var(--bdr); }
+    table { border-collapse: collapse; width: 100%; font-size: .84rem; }
+    thead th {
+      background: var(--blue); color: #fff; padding: .5rem .8rem;
+      text-align: left; white-space: nowrap; border: 1px solid var(--blue-dk);
+      cursor: pointer; user-select: none; position: relative;
+    }
+    thead th::after { content: ' ⇅'; opacity: .35; font-size: .72em; }
+    thead th.s-asc::after  { content: ' ↑'; opacity: 1; }
+    thead th.s-desc::after { content: ' ↓'; opacity: 1; }
+    tbody td { border: 1px solid var(--bdr); padding: .4rem .8rem; vertical-align: top; }
+    tbody tr:nth-child(even) td { background: var(--bg); }
+    tbody tr:hover td { background: var(--blue-lt); transition: background .1s; }
+
+    /* ── Severity & status badges ── */
+    .sev {
+      display: inline-block; padding: .1rem .38rem; border-radius: 3px;
+      font-size: .76rem; font-weight: 700; white-space: nowrap;
+    }
+    .sev-critical { background: var(--red-lt);  color: var(--red); }
+    .sev-major    { background: var(--ora-lt);  color: var(--orange); }
+    .sev-minor    { background: var(--grn-lt);  color: var(--green); }
+    .sev-high     { background: var(--red-lt);  color: var(--red); }
+    .sev-medium   { background: var(--ora-lt);  color: var(--orange); }
+    .sev-low      { background: var(--grn-lt);  color: var(--green); }
+    .status { display: inline-block; padding: .1rem .38rem; border-radius: 3px; font-size: .76rem; font-weight: 600; white-space: nowrap; }
+    .st-done     { background: var(--grn-lt); color: var(--green); }
+    .st-failed   { background: var(--red-lt); color: var(--red); }
+    .st-default  { background: var(--bg); color: var(--gray); border: 1px solid var(--bdr); }
+
+    /* ── Toolbar (search + filter) ── */
+    .toolbar { display: flex; gap: .6rem; align-items: center; margin-bottom: .8rem; flex-wrap: wrap; }
+    .search-input {
+      border: 1px solid var(--bdr); border-radius: 6px; padding: .38rem .75rem;
+      font-size: .84rem; width: 260px; outline: none; background: var(--bg2);
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .search-input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(21,101,192,.12); }
+    .filter-btn {
+      border: 1px solid var(--bdr); background: var(--bg2); border-radius: 6px;
+      padding: .32rem .7rem; font-size: .79rem; font-weight: 600; cursor: pointer;
+      transition: all .15s; white-space: nowrap; line-height: 1.4;
+    }
+    .filter-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .filter-btn.active        { background: var(--blue);   color: #fff; border-color: var(--blue); }
+    .filter-btn.f-crit.active { background: var(--red);    color: #fff; border-color: var(--red); }
+    .filter-btn.f-maj.active  { background: var(--orange); color: #fff; border-color: var(--orange); }
+    .filter-btn.f-min.active  { background: var(--green);  color: #fff; border-color: var(--green); }
+    .fc { font-size: .7rem; background: rgba(0,0,0,.12); border-radius: 10px; padding: .02rem .32rem; margin-left: .2rem; }
+    .row-count { font-size: .8rem; color: var(--gray); }
+
+    /* ── Accordion ── */
+    .accordion { display: flex; flex-direction: column; gap: .55rem; }
+    .acc-item { border: 1px solid var(--bdr); border-radius: 8px; overflow: hidden; background: var(--bg2); }
+    .acc-header {
+      padding: .65rem 1rem; cursor: pointer; display: flex; align-items: center;
+      gap: .65rem; background: var(--bg); border-bottom: 1px solid transparent;
+      transition: background .15s; user-select: none;
+    }
+    .acc-header:hover { background: var(--blue-lt); }
+    .acc-header.open  { background: var(--blue-lt); border-bottom-color: var(--bdr); }
+    .acc-arrow { font-size: .8rem; transition: transform .2s; flex-shrink: 0; color: var(--gray); }
+    .acc-header.open .acc-arrow { transform: rotate(90deg); }
+    .acc-pid   { font-size: .76rem; font-family: monospace; background: var(--blue-lt); color: var(--blue); padding: .1rem .38rem; border-radius: 3px; flex-shrink: 0; }
+    .acc-title { font-size: .87rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .acc-badges { display: flex; gap: .35rem; flex-shrink: 0; flex-wrap: wrap; }
+    .acc-body { display: none; }
+    .acc-body.open { display: block; }
+    .acc-body .tbl-wrap { border-radius: 0; border: none; border-top: 1px solid var(--bdr); }
+
+    /* ── Misc ── */
+    blockquote {
+      border-left: 4px solid var(--bdr); padding: .75rem 1rem;
+      color: var(--gray); font-style: italic; background: var(--bg);
+      border-radius: 0 6px 6px 0; font-size: .9rem;
+    }
+    .overflow-note {
+      background: #fffde7; border-left: 3px solid #f9a825;
+      padding: .5rem 1rem; font-size: .8rem; color: var(--gray);
+    }
+    .method-card {
+      background: var(--bg2); border: 1px solid var(--bdr); border-radius: 8px;
+      padding: 1.2rem 1.5rem; font-size: .9rem; line-height: 1.7;
+    }
+    .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; display: block; cursor: help; }
+
+    /* ── Back-to-top ── */
+    #btt {
+      position: fixed; bottom: 1.5rem; right: 1.5rem;
+      background: var(--blue); color: #fff; border: none; border-radius: 50%;
+      width: 40px; height: 40px; font-size: 1.1rem; cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0,0,0,.25); opacity: 0; pointer-events: none;
+      transition: opacity .2s; display: flex; align-items: center; justify-content: center;
+    }
+    #btt.vis { opacity: 1; pointer-events: auto; }
+    #btt:hover { background: var(--blue-dk); }
+  </style>
+</head>
+<body>
+
+<!-- ── Sticky Navigation ── -->
+<nav class="top-nav">
+  <div class="brand">ClaimCheck <span>Audit</span></div>
+  <div class="nav-links">
+    <a href="#summary">Summary</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#papers">Papers</a>
+    <a href="#gaps">Gaps</a>
+    <a href="#contradictions">Contradictions</a>
+    <a href="#conditional">Conditional</a>
+    <a href="#methodology">Methodology</a>
+  </div>
+  <div class="nav-right">{{ generated_at[:10] }}</div>
+</nav>
+
+<div class="page">
+
+<!-- ── Header ── -->
+<div class="report-header">
+  <h1>LoRA Variants Research Audit Report</h1>
+  <div class="subtitle">Generated by ClaimCheck &nbsp;·&nbsp; {{ generated_at }}</div>
+</div>
+
+<!-- ── Executive Summary ── -->
+<section id="summary">
+  <h2>Executive Summary</h2>
+  <div class="exec-card">{{ exec_summary_html | safe }}</div>
+</section>
+
+<!-- ── Dashboard ── -->
+<section id="dashboard">
+  <h2>Dashboard</h2>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="num blue">{{ stats.papers_total }}</div>
+      <div class="lbl">Papers Audited</div>
+    </div>
+    <div class="stat-card">
+      <div class="num gray">{{ stats.claims_total }}</div>
+      <div class="lbl">Claims Extracted</div>
+    </div>
+    <div class="stat-card">
+      <div class="num red">{{ stats.gaps_by_severity.get("critical", 0) }}</div>
+      <div class="lbl">Critical Gaps</div>
+    </div>
+    <div class="stat-card">
+      <div class="num orange">{{ stats.gaps_by_severity.get("major", 0) }}</div>
+      <div class="lbl">Major Gaps</div>
+    </div>
+    <div class="stat-card">
+      <div class="num blue">{{ stats.gaps_total }}</div>
+      <div class="lbl">Total Gaps</div>
+    </div>
+    <div class="stat-card">
+      <div class="num orange">{{ stats.contradictions_total }}</div>
+      <div class="lbl">Contradictions</div>
+    </div>
+  </div>
+
+  <div class="charts-grid">
+    <div class="chart-card">
+      <h3>Gap Severity Distribution</h3>
+      <div id="ch-severity"></div>
+    </div>
+    <div class="chart-card">
+      <h3>Contradiction Severity</h3>
+      <div id="ch-contradictions"></div>
+    </div>
+    <div class="chart-card chart-wide">
+      <h3>Gaps per Paper — stacked by severity (top 15)</h3>
+      <div id="ch-per-paper"></div>
+    </div>
+    <div class="chart-card chart-wide">
+      <h3>Top 10 Gap Types</h3>
+      <div id="ch-gap-types"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Papers Audited ── -->
+<section id="papers">
+  <h2>Papers Audited</h2>
+  <div class="toolbar">
+    <input type="text" class="search-input" id="paper-search" placeholder="Search title, ID, variant, status…">
+    <span class="row-count" id="paper-count"></span>
+  </div>
+  <div class="tbl-wrap">
+    <table id="papers-tbl">
+      <thead>
+        <tr>
+          <th>ArXiv ID</th>
+          <th>Title</th>
+          <th>Variant</th>
+          <th>Repo</th>
+          <th>Status</th>
+          <th>Gaps</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in papers %}
+        {% set pg = gaps_per_paper_stats | selectattr("paper_id", "equalto", p.arxiv_id) | list %}
+        {% set gtotal = pg[0].total if pg else 0 %}
+        <tr class="paper-row">
+          <td><code>{{ p.arxiv_id }}</code></td>
+          <td title="{{ p.title }}">{{ p.title }}</td>
+          <td>{{ p.lora_variant_tag or "—" }}</td>
+          <td>{% if p.repo_url %}<a href="{{ p.repo_url }}" target="_blank" rel="noopener noreferrer">repo ↗</a>{% else %}—{% endif %}</td>
+          <td>
+            {% set sv = p.status.value %}
+            {% if sv == "done" %}<span class="status st-done">done</span>
+            {% elif sv == "failed" %}<span class="status st-failed">failed</span>
+            {% else %}<span class="status st-default">{{ sv }}</span>{% endif %}
+          </td>
+          <td style="text-align:center;font-weight:{% if gtotal > 0 %}600{% else %}400{% endif %}">
+            {{ gtotal if gtotal > 0 else "—" }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── Reproducibility Gaps ── -->
+<section id="gaps">
+  <h2>Reproducibility Gaps</h2>
+  {% if all_gaps %}
+  <div class="toolbar" id="gap-filter-bar">
+    <button class="filter-btn active" data-f="all" onclick="filterGaps(this)">
+      All <span class="fc">{{ all_gaps | length }}</span>
+    </button>
+    <button class="filter-btn f-crit" data-f="critical" onclick="filterGaps(this)">
+      Critical <span class="fc">{{ stats.gaps_by_severity.get("critical", 0) }}</span>
+    </button>
+    <button class="filter-btn f-maj" data-f="major" onclick="filterGaps(this)">
+      Major <span class="fc">{{ stats.gaps_by_severity.get("major", 0) }}</span>
+    </button>
+    <button class="filter-btn f-min" data-f="minor" onclick="filterGaps(this)">
+      Minor <span class="fc">{{ stats.gaps_by_severity.get("minor", 0) }}</span>
+    </button>
+    <button class="filter-btn" onclick="toggleAllAcc('gaps-acc', true)"  style="margin-left:.5rem">Expand all</button>
+    <button class="filter-btn" onclick="toggleAllAcc('gaps-acc', false)">Collapse all</button>
+  </div>
+
+  <div class="accordion" id="gaps-acc">
+    {% for p in papers %}
+      {% set pgaps = all_gaps | selectattr("paper_id", "equalto", p.arxiv_id) | list %}
+      {% if pgaps %}
+        {% set crit  = pgaps | selectattr("severity", "equalto", "critical") | list | length %}
+        {% set major = pgaps | selectattr("severity", "equalto", "major")    | list | length %}
+        {% set minor = pgaps | selectattr("severity", "equalto", "minor")    | list | length %}
+
+        {# Deduplicate by gap_type, preserve first occurrence #}
+        {% set seen_types = [] %}
+        {% set uniq = [] %}
+        {% for g in pgaps %}
+          {% if g.gap_type not in seen_types %}
+            {% set _ = seen_types.append(g.gap_type) %}
+            {% set cnt = pgaps | selectattr("gap_type", "equalto", g.gap_type) | list | length %}
+            {% set _ = uniq.append({"gap": g, "count": cnt}) %}
+          {% endif %}
+        {% endfor %}
+
+        <div class="acc-item" data-paper="{{ p.arxiv_id }}">
+          <div class="acc-header" onclick="toggleAcc(this)">
+            <span class="acc-arrow">▶</span>
+            <span class="acc-pid">{{ p.arxiv_id }}</span>
+            <span class="acc-title">{{ p.title }}</span>
+            <span class="acc-badges">
+              {% if crit  %}<span class="sev sev-critical">{{ crit }} Crit</span>{% endif %}
+              {% if major %}<span class="sev sev-major">{{ major }} Maj</span>{% endif %}
+              {% if minor %}<span class="sev sev-minor">{{ minor }} Min</span>{% endif %}
+            </span>
+          </div>
+          <div class="acc-body">
+            <div class="tbl-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Severity</th>
+                    <th>Gap Type</th>
+                    <th>Description</th>
+                    <th>Count</th>
+                    <th>Paper Value</th>
+                    <th>Code Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for item in uniq %}
+                  {% set g = item.gap %}
+                  <tr class="gap-row" data-sev="{{ g.severity }}">
+                    <td><span class="sev sev-{{ g.severity }}">{{ g.severity | upper }}</span></td>
+                    <td><code>{{ g.gap_type }}</code></td>
+                    <td>
+                      <span class="trunc" title="{{ g.description }}">
+                        {{ g.description[:200] }}{% if g.description | length > 200 %}…{% endif %}
+                      </span>
+                    </td>
+                    <td style="text-align:center">{{ item.count }}</td>
+                    <td>{{ g.paper_value or "—" }}</td>
+                    <td>{{ g.code_value or "—" }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% else %}
+  <blockquote>No reproducibility gaps detected.</blockquote>
+  {% endif %}
+</section>
+
+<!-- ── Cross-Paper Contradictions ── -->
+<section id="contradictions">
+  <h2>Cross-Paper Contradictions</h2>
+  {% if contradictions %}
+  <div class="tbl-wrap">
+    <table id="contra-tbl">
+      <thead>
+        <tr>
+          <th>Severity</th>
+          <th>Paper A</th>
+          <th>Paper B</th>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in contradictions %}
+        <tr>
+          <td><span class="sev sev-{{ c.severity }}">{{ c.severity | upper }}</span></td>
+          <td><code>{{ c.paper_a_id }}</code></td>
+          <td><code>{{ c.paper_b_id }}</code></td>
+          <td><code>{{ c.contradiction_type }}</code></td>
+          <td>{{ c.description }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <blockquote>No cross-paper contradictions detected. This reflects claim non-overlap across the audited corpus, not verified consistency across shared benchmarks.</blockquote>
+  {% endif %}
+</section>
+
+<!-- ── Conditional Claim Registry ── -->
+<section id="conditional">
+  <h2>Conditional Claim Registry</h2>
+  {% if conditional_claims %}
+  <p style="font-size:.84rem;color:var(--gray);margin-bottom:.75rem">
+    <em>{{ conditional_claims | length }} claims flagged as conditional — results only valid under specific hyperparameter/dataset conditions.</em>
+  </p>
+  <div class="accordion">
+    {% for p in papers %}
+      {% set pcond = conditional_claims | selectattr("paper_id", "equalto", p.arxiv_id) | list %}
+      {% if pcond %}
+      <div class="acc-item">
+        <div class="acc-header" onclick="toggleAcc(this)">
+          <span class="acc-arrow">▶</span>
+          <span class="acc-pid">{{ p.arxiv_id }}</span>
+          <span class="acc-title">{{ p.title }}</span>
+          <span class="acc-badges"><span class="sev sev-minor">{{ pcond | length }} claims</span></span>
+        </div>
+        <div class="acc-body">
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr><th>Metric</th><th>Dataset</th><th>Model</th><th>Value</th><th>Key Conditions</th></tr>
+              </thead>
+              <tbody>
+                {% for c in pcond %}
+                <tr>
+                  <td>{{ c.metric }}</td>
+                  <td>{{ c.dataset or "—" }}</td>
+                  <td>{{ c.model_base }}</td>
+                  <td>{{ c.reported_value }}{% if c.unit %} {{ c.unit }}{% endif %}</td>
+                  <td>
+                    {% set citems = c.conditions.items() | list %}
+                    {% for k, v in citems[:4] %}<code>{{ k }}={{ v }}</code>{% if not loop.last %} {% endif %}{% endfor %}
+                    {% if citems | length > 4 %} <em style="color:var(--gray)">+{{ citems | length - 4 }} more</em>{% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% else %}
+  <blockquote>No conditional claims registered.</blockquote>
+  {% endif %}
+</section>
+
+{% if include_raw_claims and all_claims %}
+<section id="appendix">
+  <h2>Appendix — All Extracted Claims</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>Paper</th><th>Metric</th><th>Dataset</th><th>Model</th><th>Value</th><th>Unit</th></tr>
+      </thead>
+      <tbody>
+        {% for c in all_claims %}
+        <tr>
+          <td><code>{{ c.paper_id }}</code></td>
+          <td>{{ c.metric }}</td>
+          <td>{{ c.dataset or "—" }}</td>
+          <td>{{ c.model_base }}</td>
+          <td>{{ c.reported_value }}</td>
+          <td>{{ c.unit or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<!-- ── Methodology ── -->
+<section id="methodology">
+  <h2>Methodology</h2>
+  <div class="method-card">{{ methodology }}</div>
+</section>
+
+</div><!-- .page -->
+
+<button id="btt" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Back to top">↑</button>
+
+<!-- ── Chart data (server-rendered JSON) ── -->
+<script>const CHART_DATA = {{ chart_data | tojson }};</script>
+
+<!-- ── Plotly charts ── -->
+<script>
+(function () {
+  var C = CHART_DATA;
+  var tp = 'rgba(0,0,0,0)';
+  var base = {paper_bgcolor: tp, plot_bgcolor: tp,
+               font: {family: '-apple-system,"Segoe UI",sans-serif', size: 12},
+               showlegend: true};
+  var cfg = {displayModeBar: false, responsive: true};
+
+  function empty(id, msg) {
+    document.getElementById(id).innerHTML =
+      '<div style="min-height:200px;display:flex;align-items:center;justify-content:center;' +
+      'color:#aaa;font-size:.88rem">' + msg + '</div>';
+  }
+
+  /* Chart 1 — Severity donut */
+  if (C.severity.values.some(function(v){return v>0;})) {
+    Plotly.newPlot('ch-severity', [{
+      type:'pie', hole:0.52,
+      labels: C.severity.labels, values: C.severity.values,
+      marker: {colors: C.severity.colors},
+      textinfo: 'label+value',
+      hovertemplate: '%{label}: %{value}<br>%{percent}<extra></extra>',
+    }], Object.assign({}, base, {height:280, margin:{t:10,b:10,l:10,r:10}}), cfg);
+  } else { empty('ch-severity', 'No gaps recorded'); }
+
+  /* Chart 2 — Contradiction severity bar */
+  if (C.contradictions.values.some(function(v){return v>0;})) {
+    Plotly.newPlot('ch-contradictions', [{
+      type:'bar',
+      x: C.contradictions.labels, y: C.contradictions.values,
+      marker: {color:['#c62828','#e65100','#2e7d32']},
+      hovertemplate: '%{x}: %{y}<extra></extra>',
+    }], Object.assign({}, base, {height:280, margin:{t:10,b:30,l:40,r:10},
+      showlegend:false,
+      yaxis:{title:{text:'Count',font:{size:11}}}}), cfg);
+  } else { empty('ch-contradictions', 'No contradictions recorded'); }
+
+  /* Chart 3 — Gaps per paper (stacked horizontal bar) */
+  if (C.gaps_per_paper.papers.length > 0) {
+    var hPP = Math.max(260, C.gaps_per_paper.papers.length * 28 + 70);
+    Plotly.newPlot('ch-per-paper', [
+      {name:'Critical', type:'bar', orientation:'h',
+       x: C.gaps_per_paper.critical, y: C.gaps_per_paper.papers,
+       marker:{color:'#c62828'}, hovertemplate:'Critical: %{x}<extra>%{y}</extra>'},
+      {name:'Major', type:'bar', orientation:'h',
+       x: C.gaps_per_paper.major, y: C.gaps_per_paper.papers,
+       marker:{color:'#e65100'}, hovertemplate:'Major: %{x}<extra>%{y}</extra>'},
+      {name:'Minor', type:'bar', orientation:'h',
+       x: C.gaps_per_paper.minor, y: C.gaps_per_paper.papers,
+       marker:{color:'#2e7d32'}, hovertemplate:'Minor: %{x}<extra>%{y}</extra>'},
+    ], Object.assign({}, base, {barmode:'stack', height:hPP,
+      margin:{t:10,b:40,l:210,r:10},
+      xaxis:{title:{text:'Number of Gaps',font:{size:11}}},
+      legend:{orientation:'h', x:0, y:-0.12}}), cfg);
+  } else { empty('ch-per-paper', 'No gaps to display'); }
+
+  /* Chart 4 — Gap types horizontal bar */
+  if (C.gap_types.labels.length > 0) {
+    var hGT = Math.max(260, C.gap_types.labels.length * 28 + 70);
+    Plotly.newPlot('ch-gap-types', [{
+      type:'bar', orientation:'h',
+      x: C.gap_types.values, y: C.gap_types.labels,
+      marker:{color:'#1565c0'},
+      hovertemplate: '%{y}: %{x}<extra></extra>',
+    }], Object.assign({}, base, {height:hGT, showlegend:false,
+      margin:{t:10,b:40,l:160,r:10},
+      xaxis:{title:{text:'Count',font:{size:11}}}}), cfg);
+  } else { empty('ch-gap-types', 'No gap types to display'); }
+})();
+</script>
+
+<!-- ── Interactive UI ── -->
+<script>
+/* Accordion toggle */
+function toggleAcc(header) {
+  header.classList.toggle('open');
+  header.nextElementSibling.classList.toggle('open');
+}
+
+/* Expand / collapse all accordions in a container */
+function toggleAllAcc(containerId, expand) {
+  var acc = document.getElementById(containerId);
+  if (!acc) return;
+  acc.querySelectorAll('.acc-header').forEach(function(h) {
+    if (expand) { h.classList.add('open'); h.nextElementSibling.classList.add('open'); }
+    else        { h.classList.remove('open'); h.nextElementSibling.classList.remove('open'); }
+  });
+}
+
+/* Gap severity filter */
+function filterGaps(btn) {
+  var sev = btn.dataset.f;
+  document.querySelectorAll('#gap-filter-bar .filter-btn').forEach(function(b) {
+    b.classList.remove('active');
+  });
+  btn.classList.add('active');
+
+  document.querySelectorAll('#gaps-acc .acc-item').forEach(function(item) {
+    var rows = item.querySelectorAll('.gap-row');
+    var visible = 0;
+    rows.forEach(function(r) {
+      var show = sev === 'all' || r.dataset.sev === sev;
+      r.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    item.style.display = visible > 0 ? '' : 'none';
+  });
+}
+
+/* Papers table search */
+(function () {
+  var inp = document.getElementById('paper-search');
+  var rows = document.querySelectorAll('#papers-tbl .paper-row');
+  var counter = document.getElementById('paper-count');
+  function refresh() {
+    var q = inp.value.toLowerCase();
+    var n = 0;
+    rows.forEach(function(r) {
+      var show = r.textContent.toLowerCase().includes(q);
+      r.style.display = show ? '' : 'none';
+      if (show) n++;
+    });
+    counter.textContent = n + ' / ' + rows.length + ' papers';
+  }
+  if (inp) { inp.addEventListener('input', refresh); refresh(); }
+})();
+
+/* Sortable table columns */
+document.querySelectorAll('thead th').forEach(function(th) {
+  th.addEventListener('click', function() {
+    var tbl = th.closest('table');
+    var tbody = tbl.querySelector('tbody');
+    var idx = [].indexOf.call(th.parentElement.children, th);
+    var asc = th.classList.contains('s-asc');
+    tbl.querySelectorAll('thead th').forEach(function(t) { t.classList.remove('s-asc','s-desc'); });
+    th.classList.add(asc ? 's-desc' : 's-asc');
+    var rows = [].slice.call(tbody.querySelectorAll('tr'));
+    rows.sort(function(a, b) {
+      var av = (a.cells[idx] || {}).textContent.trim();
+      var bv = (b.cells[idx] || {}).textContent.trim();
+      var an = parseFloat(av.replace(/[^0-9.\-]/g,'')), bn = parseFloat(bv.replace(/[^0-9.\-]/g,''));
+      if (!isNaN(an) && !isNaN(bn)) return asc ? bn - an : an - bn;
+      return asc ? bv.localeCompare(av) : av.localeCompare(bv);
+    });
+    rows.forEach(function(r) { tbody.appendChild(r); });
+  });
+});
+
+/* Back-to-top */
+var btt = document.getElementById('btt');
+window.addEventListener('scroll', function() { btt.classList.toggle('vis', window.scrollY > 400); });
+
+/* Active nav highlight via IntersectionObserver */
+var navLinks = document.querySelectorAll('.nav-links a');
+var sectionIds = ['summary','dashboard','papers','gaps','contradictions','conditional','methodology'];
+var io = new IntersectionObserver(function(entries) {
+  entries.forEach(function(e) {
+    if (e.isIntersecting) {
+      navLinks.forEach(function(a) { a.classList.remove('active'); });
+      var link = document.querySelector('.nav-links a[href="#' + e.target.id + '"]');
+      if (link) link.classList.add('active');
+    }
+  });
+}, {rootMargin: '-45% 0px -45% 0px'});
+sectionIds.forEach(function(id) {
+  var el = document.getElementById(id);
+  if (el) io.observe(el);
+});
+</script>
+
+</body>
+</html>

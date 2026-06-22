@@ -1,0 +1,10 @@
+{
+  "claim_extraction": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "papers_evaluated": 2,
+    "total_ground_truth_claims": 3,
+    "total_extracted_claims": 3
+  }
+}

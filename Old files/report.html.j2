@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoRA Variants Research Audit Report</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 1100px;
+           margin: 2rem auto; padding: 0 1.5rem; color: #1a1a1a; line-height: 1.6; }
+    h1 { border-bottom: 3px solid #1565c0; padding-bottom: .4rem; margin-bottom: .2rem; }
+    h1 small { font-size: .5em; color: #666; font-weight: 400; }
+    h2 { color: #1565c0; margin-top: 2.5rem; border-bottom: 1px solid #dde3ec; padding-bottom: .2rem; }
+    h3 { margin-top: 1.8rem; color: #333; font-size: 1rem; }
+    p { margin: .5rem 0; }
+
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .88rem; }
+    th { background: #1565c0; color: #fff; padding: .45rem .7rem; text-align: left; white-space: nowrap; }
+    td { border: 1px solid #dde3ec; padding: .4rem .7rem; vertical-align: top; }
+    tr:nth-child(even) td { background: #f5f7fa; }
+    th { border: 1px solid #0d47a1; }
+
+    .sev-critical { background:#fdecea; color:#c62828; font-weight:700; padding:.15rem .4rem; border-radius:3px; white-space:nowrap; }
+    .sev-major    { background:#fff3e0; color:#e65100; font-weight:700; padding:.15rem .4rem; border-radius:3px; white-space:nowrap; }
+    .sev-minor    { background:#e8f5e9; color:#2e7d32; font-weight:600; padding:.15rem .4rem; border-radius:3px; white-space:nowrap; }
+    .sev-high     { background:#fdecea; color:#c62828; font-weight:700; padding:.15rem .4rem; border-radius:3px; white-space:nowrap; }
+    .sev-medium   { background:#fff3e0; color:#e65100; font-weight:700; padding:.15rem .4rem; border-radius:3px; white-space:nowrap; }
+    .sev-low      { background:#e8f5e9; color:#2e7d32; font-weight:600; padding:.15rem .4rem; border-radius:3px; white-space:nowrap; }
+
+    code { background:#eef1f5; padding:.1rem .35rem; border-radius:3px; font-size:.85em; font-family: monospace; }
+
+    .exec-summary { background:#f5f7fa; border-left:4px solid #1565c0;
+                    padding:1rem 1.2rem; border-radius:0 6px 6px 0;
+                    font-size:.95rem; margin:1rem 0; }
+    .exec-summary h2 { color:#1565c0; margin-top:1rem; font-size:1rem; border:none; }
+    .exec-summary p { margin:.5rem 0; }
+    .exec-summary ul { margin:.5rem 0; padding-left:1.5rem; }
+    .exec-summary li { margin:.3rem 0; }
+    .exec-summary strong { color:#1a1a1a; }
+    .exec-summary code { background:#e8edf5; }
+
+    .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+                  gap:1rem; margin:1.2rem 0; }
+    .stat-card  { background:#f5f7fa; border:1px solid #dde3ec; border-radius:6px;
+                  padding:.8rem 1rem; text-align:center; }
+    .stat-card .num { font-size:2rem; font-weight:700; color:#1565c0; }
+    .stat-card .num.red { color:#c62828; }
+    .stat-card .num.orange { color:#e65100; }
+    .stat-card .lbl { font-size:.8rem; color:#555; margin-top:.2rem; }
+
+    .paper-section { border:1px solid #dde3ec; border-radius:6px; margin:1.2rem 0; overflow:hidden; }
+    .paper-header  { background:#eef1f5; padding:.6rem 1rem; font-weight:600; font-size:.9rem; color:#1a1a1a; }
+    .paper-body    { padding:.5rem 0; }
+    .gap-counts    { font-size:.82rem; color:#555; font-weight:400; margin-left:.5rem; }
+
+    .overflow-note { background:#fffde7; border-left:3px solid #f9a825;
+                     padding:.6rem 1rem; margin:.5rem 1rem 1rem; border-radius:0 4px 4px 0;
+                     font-size:.85rem; color:#555; }
+
+    blockquote { border-left:4px solid #ccc; margin:1rem 0; padding:.5rem 1rem;
+                 color:#555; font-style:italic; background:#fafafa; border-radius:0 4px 4px 0; }
+    a { color:#1565c0; }
+    hr { border:none; border-top:1px solid #dde3ec; margin:2rem 0; }
+  </style>
+</head>
+<body>
+
+<h1>LoRA Variants Research Audit Report
+  <br><small>Generated at {{ generated_at }}</small>
+</h1>
+
+<h2>Executive Summary</h2>
+<div class="exec-summary">{{ exec_summary_html | safe }}</div>
+
+<div class="stats-grid">
+  <div class="stat-card"><div class="num">{{ stats.papers_total }}</div><div class="lbl">Papers Audited</div></div>
+  <div class="stat-card"><div class="num">{{ stats.claims_total }}</div><div class="lbl">Claims Extracted</div></div>
+  <div class="stat-card"><div class="num red">{{ stats.gaps_by_severity.get("critical", 0) }}</div><div class="lbl">Critical Gaps</div></div>
+  <div class="stat-card"><div class="num orange">{{ stats.gaps_by_severity.get("major", 0) }}</div><div class="lbl">Major Gaps</div></div>
+  <div class="stat-card"><div class="num">{{ stats.gaps_total }}</div><div class="lbl">Total Gaps</div></div>
+  <div class="stat-card"><div class="num">{{ stats.contradictions_total }}</div><div class="lbl">Contradictions</div></div>
+</div>
+
+<h2>Methodology</h2>
+<p>{{ methodology }}</p>
+
+<table>
+  <tr><th>Metric</th><th>Count</th></tr>
+  <tr><td>Papers audited</td><td>{{ stats.papers_total }}</td></tr>
+  <tr><td>Benchmark claims extracted</td><td>{{ stats.claims_total }}</td></tr>
+  <tr><td>Conditional claims</td><td>{{ stats.claims_conditional or "—" }}</td></tr>
+  <tr><td>Code facts extracted</td><td>{{ stats.code_facts_total or "—" }}</td></tr>
+  <tr><td>Reproducibility gaps — Critical</td><td>{{ stats.gaps_by_severity.get("critical", 0) }}</td></tr>
+  <tr><td>Reproducibility gaps — Major</td><td>{{ stats.gaps_by_severity.get("major", 0) }}</td></tr>
+  <tr><td>Reproducibility gaps — Minor</td><td>{{ stats.gaps_by_severity.get("minor", 0) }}</td></tr>
+  <tr><td>Cross-paper contradictions</td><td>{{ stats.contradictions_total }}</td></tr>
+</table>
+
+<h2>Papers Audited</h2>
+<table>
+  <tr><th>ArXiv ID</th><th>Title</th><th>Variant</th><th>Repo</th><th>Status</th></tr>
+  {% for p in papers %}
+  <tr>
+    <td><code>{{ p.arxiv_id }}</code></td>
+    <td>{{ p.title }}</td>
+    <td>{{ p.lora_variant_tag }}</td>
+    <td>{% if p.repo_url %}<a href="{{ p.repo_url }}" target="_blank">repo ↗</a>{% else %}—{% endif %}</td>
+    <td>{{ p.status.value }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<!-- ── Reproducibility Gaps: one row per unique gap_type per paper ── -->
+<h2>Reproducibility Gaps</h2>
+{% if all_gaps %}
+  {% for paper in papers %}
+    {% set paper_gaps = all_gaps | selectattr("paper_id", "equalto", paper.arxiv_id) | list %}
+    {% if paper_gaps %}
+      {# Deduplicate: collect unique gap_types with counts #}
+      {% set seen_types = [] %}
+      {% set unique_gaps = [] %}
+      {% for g in paper_gaps %}
+        {% if g.gap_type not in seen_types %}
+          {% set _ = seen_types.append(g.gap_type) %}
+          {% set type_count = paper_gaps | selectattr("gap_type", "equalto", g.gap_type) | list | length %}
+          {% set _ = unique_gaps.append({"gap": g, "count": type_count}) %}
+        {% endif %}
+      {% endfor %}
+
+      {% set crit  = paper_gaps | selectattr("severity", "equalto", "critical") | list | length %}
+      {% set major = paper_gaps | selectattr("severity", "equalto", "major")    | list | length %}
+      {% set minor = paper_gaps | selectattr("severity", "equalto", "minor")    | list | length %}
+
+      <div class="paper-section">
+        <div class="paper-header">
+          {{ paper.arxiv_id }} — {{ paper.title }}
+          <span class="gap-counts">
+            {% if crit  %}<span class="sev-critical">{{ crit }} Critical</span> {% endif %}
+            {% if major %}<span class="sev-major">{{ major }} Major</span> {% endif %}
+            {% if minor %}<span class="sev-minor">{{ minor }} Minor</span>{% endif %}
+          </span>
+        </div>
+        <div class="paper-body">
+          <table>
+            <tr><th>Severity</th><th>Gap Type</th><th>Description</th><th>Count</th><th>Example: Paper Value</th><th>Example: Code Value</th></tr>
+            {% for item in unique_gaps[:5] %}
+            {% set g = item.gap %}
+            <tr>
+              <td><span class="sev-{{ g.severity }}">{{ g.severity | upper }}</span></td>
+              <td><code>{{ g.gap_type }}</code></td>
+              <td>{{ g.description[:150] }}{% if g.description | length > 150 %}…{% endif %}</td>
+              <td>{{ item.count }}</td>
+              <td>{{ g.paper_value or "—" }}</td>
+              <td>{{ g.code_value or "—" }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+          {% if unique_gaps | length > 5 %}
+          {% set remaining = unique_gaps[5:] %}
+          <div class="overflow-note">
+            <strong>{{ remaining | length }} additional gap type(s) not shown:</strong>
+            {% for item in remaining %}
+            <code>{{ item.gap.gap_type }}</code> ({{ item.count }} instance(s), {{ item.gap.severity }}){% if not loop.last %}, {% endif %}
+            {% endfor %}.
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+  {% endfor %}
+{% else %}
+  <blockquote>No reproducibility gaps detected.</blockquote>
+{% endif %}
+
+<!-- ── Cross-Paper Contradictions ── -->
+<h2>Cross-Paper Contradictions</h2>
+{% if contradictions %}
+<table>
+  <tr><th>Severity</th><th>Paper A</th><th>Paper B</th><th>Type</th><th>Description</th></tr>
+  {% for c in contradictions[:5] %}
+  <tr>
+    <td><span class="sev-{{ c.severity }}">{{ c.severity | upper }}</span></td>
+    <td><code>{{ c.paper_a_id }}</code></td>
+    <td><code>{{ c.paper_b_id }}</code></td>
+    <td><code>{{ c.contradiction_type }}</code></td>
+    <td>{{ c.description }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if contradictions | length > 5 %}
+<div class="overflow-note">
+  {{ contradictions | length - 5 }} additional contradiction(s) not shown.
+  Remaining severities:
+  {% set rem = contradictions[5:] %}
+  {{ rem | selectattr("severity","equalto","high") | list | length }} high,
+  {{ rem | selectattr("severity","equalto","medium") | list | length }} medium,
+  {{ rem | selectattr("severity","equalto","low") | list | length }} low.
+</div>
+{% endif %}
+{% else %}
+<blockquote>No cross-paper contradictions detected. This reflects claim non-overlap across the audited corpus, not verified consistency across shared benchmarks.</blockquote>
+{% endif %}
+
+<!-- ── Conditional Claim Registry ── -->
+<h2>Conditional Claim Registry</h2>
+{% if conditional_claims %}
+<p><em>{{ conditional_claims | length }} claims flagged as conditional — results only valid under specific hyperparameter/dataset conditions.</em></p>
+
+{% for paper in papers %}
+  {% set paper_cond = conditional_claims | selectattr("paper_id", "equalto", paper.arxiv_id) | list %}
+  {% if paper_cond %}
+  <div class="paper-section">
+    <div class="paper-header">{{ paper.arxiv_id }} — {{ paper.title }}
+      <span class="gap-counts">{{ paper_cond | length }} conditional claims</span>
+    </div>
+    <div class="paper-body">
+      <table>
+        <tr><th>Metric</th><th>Dataset</th><th>Model</th><th>Value</th><th>Key Conditions</th></tr>
+        {% for c in paper_cond[:5] %}
+        <tr>
+          <td>{{ c.metric }}</td>
+          <td>{{ c.dataset }}</td>
+          <td>{{ c.model_base }}</td>
+          <td>{{ c.reported_value }}{{ c.unit or "" }}</td>
+          <td>
+            {% set cond_items = c.conditions.items() | list %}
+            {% for k, v in cond_items[:3] %}<code>{{ k }}={{ v }}</code> {% endfor %}
+            {% if cond_items | length > 3 %}<em>+{{ cond_items | length - 3 }} more</em>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% if paper_cond | length > 5 %}
+      {% set rest = paper_cond[5:] %}
+      {% set metrics = rest | map(attribute="metric") | list %}
+      <div class="overflow-note">
+        <strong>{{ rest | length }} further claims not shown.</strong>
+        Remaining metrics cover:
+        {% set unique_metrics = [] %}
+        {% for m in metrics %}{% if m not in unique_metrics %}{% set _ = unique_metrics.append(m) %}{% endif %}{% endfor %}
+        {{ unique_metrics[:6] | join(", ") }}{% if unique_metrics | length > 6 %} and {{ unique_metrics | length - 6 }} more{% endif %}.
+        Datasets include:
+        {% set unique_ds = [] %}
+        {% for c in rest %}{% if c.dataset not in unique_ds %}{% set _ = unique_ds.append(c.dataset) %}{% endif %}{% endfor %}
+        {{ unique_ds[:4] | join(", ") }}{% if unique_ds | length > 4 %} and {{ unique_ds | length - 4 }} more{% endif %}.
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+{% endfor %}
+{% else %}
+<blockquote>No conditional claims registered.</blockquote>
+{% endif %}
+
+{% if include_raw_claims %}
+<hr>
+<h2>Appendix: All Extracted Claims</h2>
+<table>
+  <tr><th>Paper</th><th>Metric</th><th>Dataset</th><th>Model</th><th>Value</th><th>Unit</th></tr>
+  {% for c in all_claims[:5] %}
+  <tr>
+    <td><code>{{ c.paper_id }}</code></td>
+    <td>{{ c.metric }}</td>
+    <td>{{ c.dataset }}</td>
+    <td>{{ c.model_base }}</td>
+    <td>{{ c.reported_value }}</td>
+    <td>{{ c.unit or "—" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if all_claims | length > 5 %}
+<div class="overflow-note">{{ all_claims | length - 5 }} additional claims not shown in this view.</div>
+{% endif %}
+{% endif %}
+
+</body>
+</html>

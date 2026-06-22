@@ -1,0 +1,25 @@
+[
+  {
+    "arxiv_id": "2106.09685",
+    "ground_truth_claims": [
+      {"metric": "accuracy", "dataset": "GLUE/MNLI", "model_base": "RoBERTa-large",
+       "reported_value": 90.2, "conditions": {"rank": "8"}, "is_conditional": true},
+      {"metric": "accuracy", "dataset": "GLUE/SST-2", "model_base": "RoBERTa-large",
+       "reported_value": 96.2, "conditions": {"rank": "8"}, "is_conditional": true}
+    ],
+    "known_gaps": [
+      {"gap_type": "condition_undisclosed", "severity": "major",
+       "description": "Paper uses rank=8 but default config sets rank=16"}
+    ],
+    "known_contradictions": []
+  },
+  {
+    "arxiv_id": "2305.14314",
+    "ground_truth_claims": [
+      {"metric": "accuracy", "dataset": "MMLU", "model_base": "LLaMA-65B",
+       "reported_value": 63.9, "conditions": {"bits": "4"}, "is_conditional": true}
+    ],
+    "known_gaps": [],
+    "known_contradictions": []
+  }
+]

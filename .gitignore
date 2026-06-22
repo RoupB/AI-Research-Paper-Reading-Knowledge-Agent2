@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Runtime data (large, contains API results — commit only demo data intentionally)
+data/audit.db
+artifacts/pdfs/
+artifacts/claim_graph.json
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Reports (generated at runtime)
+reports/*.md
+reports/*.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
