@@ -43,7 +43,9 @@ When asked to create or extend an agent, use this structure:
 from __future__ import annotations
 import json
 import uuid
+from anthropic import AsyncAnthropic
 from agents.base_agent import get_logger, run_with_limit, with_retry
+from agents.llm import call_llm_json, make_client
 from config import settings
 from models import <InputModel>, <OutputModel>, PaperStatus
 from db import queries
@@ -79,30 +81,19 @@ class {Name}Agent:
 | ReportGenerationAgent | corpus-level | sets all `GAPS_ANALYZED` → `DONE` |
 
 ### LLM call template
-```python
-import anthropic
-client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+All LLM calls go through `agents/llm.py`. Never inline client construction or the JSON retry pattern.
 
-async def _call_llm(system: str, user: str) -> dict:
-    response = await client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=settings.anthropic_max_tokens,
-        temperature=settings.anthropic_temperature,
-        messages=[{"role": "user", "content": user}],
-        system=system,
-    )
-    text = response.content[0].text
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        retry_response = await client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=settings.anthropic_max_tokens,
-            temperature=settings.anthropic_temperature,
-            messages=[{"role": "user", "content": "Respond only with JSON, no prose.\n" + user}],
-            system=system,
-        )
-        return json.loads(retry_response.content[0].text)
+```python
+from agents.llm import call_llm_json, make_client
+
+class MyAgent:
+    def __init__(self, client=None):
+        self.client = client or make_client()   # injectable for tests
+
+    async def _call_llm(self, system: str, user: str) -> dict:
+        # call_llm_json handles: client call, markdown fence stripping,
+        # JSONDecodeError retry, and raises on second failure.
+        return await call_llm_json(self.client, system, user)
 ```
 
 ### DB query template
@@ -302,6 +293,8 @@ async def test_insert_{entity}(test_db):
 | All settings | `config.py` |
 | LangGraph graph | `main.py` → `build_graph()` |
 | Shared agent utilities | `agents/base_agent.py` |
+| Shared LLM helpers | `agents/llm.py` |
+| Service layer (pipeline + MCP) | `services.py` |
 | Streamlit chart helpers | `app/components/charts.py` |
 | Streamlit DB readers | `app/components/db_reader.py` |
 | PDF utilities | `tools/pdf_tool.py` |

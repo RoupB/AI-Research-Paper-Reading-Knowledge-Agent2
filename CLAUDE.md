@@ -24,10 +24,12 @@ agents/repo_resolution.py        ← Agent 2: GitHub repo finder
 agents/claim_extraction.py       ← Agent 3: PDF → structured benchmark claims
 agents/code_analysis.py          ← Agent 4: GitHub repo → code facts
 agents/gap_analysis.py           ← Agent 5: claims vs code → gaps
+agents/llm.py                    ← Shared LLM client + JSON-retry helper
 agents/contradiction_mapping.py  ← Agent 6: cross-paper contradictions
 agents/report_generation.py      ← Agent 7: Markdown + HTML report
 app/streamlit_app.py             ← Streamlit frontend
 main.py                          ← LangGraph graph + typer CLI
+services.py                      ← Service layer (shared by LangGraph + MCP)
 ```
 
 All agents share a single **SQLite** database (`data/audit.db`). No agent writes to another agent's tables. The pipeline status of each paper advances through:
@@ -58,15 +60,19 @@ from __future__ import annotations   # always first in every file
 
 ### LLM Calls
 - Always use the `anthropic` SDK directly (not LangChain's wrapper)
+- All LLM calls go through `agents/llm.py`: use `make_client()` for the client and `call_llm_json()` for JSON calls
 - Every LLM call must expect **JSON output only**
-- JSON retry pattern (mandatory — do not deviate):
+- JSON retry pattern (mandatory — `call_llm_json()` implements this automatically):
   ```python
-  response = await call_llm(prompt)
-  try:
-      data = json.loads(response)
-  except json.JSONDecodeError:
-      response = await call_llm("Respond only with JSON, no prose.\n" + prompt)
-      data = json.loads(response)   # raises on second failure → caught by caller
+  from agents.llm import call_llm_json, make_client
+
+  # At class init:
+  self.client = client or make_client()
+
+  # To call LLM and get parsed JSON:
+  data = await call_llm_json(self.client, system_prompt, user_prompt)
+  # First JSONDecodeError → retries once with "Respond only with JSON" prefix.
+  # Second failure raises JSONDecodeError → caught by caller.
   ```
 - Temperature: `settings.anthropic_temperature` (default 0.1) for all extraction tasks
 - **Cost awareness**: Before adding a new LLM call, estimate its token cost. Full-paper calls (ClaimExtraction, CodeAnalysis) are expensive (~30K tokens each). Prefer structured JSON inputs over raw text re-sending. Never re-send the full paper text to a downstream agent — use the structured DB records instead.
@@ -180,6 +186,8 @@ If the agent produces data that should be displayed, add/update the relevant pag
 | `db/schema.sql` | Add columns/tables here; run `db/init_db.py` to rebuild |
 | `db/queries.py` | One function per SQL operation; always document with SQL comment |
 | `agents/base_agent.py` | Do not add agent-specific logic; only shared utilities |
+| `agents/llm.py` | LLM helpers only — `make_client()`, `call_llm()`, `call_llm_json()`; no business logic |
+| `services.py` | Service layer — thin wrappers calling agents; shared by pipeline and MCP; never import MCP handlers from here |
 | `config.py` | Add new settings as typed fields with defaults; never hardcode values |
 | `main.py` | Only pipeline wiring (LangGraph nodes/edges) + CLI commands |
 | `app/components/charts.py` | Chart helpers only — no DB calls, no Streamlit widgets |

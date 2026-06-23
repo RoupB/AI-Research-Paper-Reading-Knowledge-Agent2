@@ -89,6 +89,7 @@ async def test_hallucinated_claim_ids_discarded(test_db, mock_llm):
     await queries.insert_paper(_paper("2106.09685", "LoRA"))
     await queries.insert_claim(_claim("2305.14314", "c1", 90.2))
     await queries.insert_claim(_claim("2106.09685", "c2", 85.0))
+    # LLM returns a hallucinated claim ID; the heuristic should still find the real pair.
     resp = [
         {
             "paper_a_id": "2305.14314",
@@ -103,4 +104,9 @@ async def test_hallucinated_claim_ids_discarded(test_db, mock_llm):
     client = mock_llm(json.dumps(resp))
     agent = ContradictionMappingAgent(client=client)
     out = await agent.run()
-    assert out.contradictions_found == 0
+    # Heuristic detects the real numeric contradiction (90.2 vs 85.0 ≈ 6% diff)
+    assert out.contradictions_found == 1
+    contras = await queries.get_all_contradictions()
+    # Saved contradiction must reference valid claim IDs, not the hallucinated one
+    assert contras[0].claim_a_id in {"c1", "c2"}
+    assert contras[0].claim_b_id in {"c1", "c2"}

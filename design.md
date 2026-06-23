@@ -118,7 +118,9 @@ Each agent exposes:
 - `run(input: InputModel) -> OutputModel` — single-paper operation
 - `run_all(paper_ids: list[str]) -> None` — batch operation called from LangGraph nodes
 
-All agents use the shared concurrency semaphore (`PIPELINE_CONCURRENCY=3`) from `base_agent.py`.
+`ContradictionMappingAgent` and `ReportGenerationAgent` are corpus-level: `run()` takes no arguments and loads the full DB corpus directly.
+
+All agents use the shared concurrency semaphore (`PIPELINE_CONCURRENCY=3`) from `base_agent.py`. All LLM calls go through `agents/llm.py` — agents accept an optional `client: AsyncAnthropic` at `__init__` for test injection.
 
 ```mermaid
 classDiagram
@@ -297,6 +299,25 @@ loop = asyncio.get_event_loop()
 text = await loop.run_in_executor(None, fetch_and_cache_pdf, pdf_url, arxiv_id, cache_dir)
 ```
 
+### 2.5 Shared LLM Helper — `agents/llm.py`
+
+All agents import `make_client()` and `call_llm_json()` from this module. `call_llm_json()` implements the mandatory JSON retry pattern (retry once with "Respond only with JSON" prefix on `JSONDecodeError`) and strips markdown code fences before parsing.
+
+```python
+from agents.llm import call_llm_json, make_client
+
+class SomeAgent:
+    def __init__(self, client=None):
+        self.client = client or make_client()   # injectable for tests
+
+    async def _call(self, system, user):
+        return await call_llm_json(self.client, system, user)
+```
+
+### 2.6 Service Layer — `services.py`
+
+`services.py` is the canonical, reusable business operations layer shared by the LangGraph pipeline (CLI) and the MCP server. MCP tool handlers call service functions — they never import agent classes directly. Key functions: `run_pipeline()`, `get_run_status()`, `list_papers()`, `get_claims()`, `get_gaps()`, `get_contradictions()`, `get_stats()`, `generate_report()`.
+
 ---
 
 ## 3. Streamlit Frontend Design
@@ -378,13 +399,15 @@ G.add_edge(claim_a_id, claim_b_id,
            contradiction_type=..., severity=..., description=...)
 ```
 
-**Clustering strategy** (Python, no LLM):
-1. Group all claims by `(metric, dataset, model_base)` using `pandas.groupby`
-2. Discard clusters with all claims from the same paper
-3. For each cluster: if ≤ 20 claims → send to LLM as one batch
-4. If > 20 claims → select the claim from the most-cited paper as pivot; send pairwise
+**Clustering strategy** (Python + LLM two-pass via `agents/llm.py`):
+1. **Synonym normalisation** — metric/dataset/model strings mapped through synonym tables before clustering (e.g. "acc"→"accuracy", "sst2"→"sst-2", "llama-7b-hf"→"llama-7b") to prevent split clusters from spelling variants
+2. Group all claims by `(norm_metric, norm_dataset, norm_model_base)` using `defaultdict`
+3. Discard clusters where all claims belong to a single paper
+4. **Pass 1 — heuristic numeric detection** (no LLM): for every cross-paper claim pair, flag `direct_numeric` if relative diff ≥ 1% or absolute diff ≥ 0.5. Severity: high ≥5% rel, medium 1–5%, low otherwise
+5. **Pass 2 — LLM** (for `conditional_flip`, `dataset_scope`, and numeric misses): send cluster JSON to `call_llm_json()`; validate returned claim IDs; deduplicate against Pass 1 via `seen_pairs` frozenset
+6. For clusters > 20 claims: `_batch_cluster()` picks the most-cited paper's claim as pivot and returns pairwise batches
 
-The graph is serialised to `artifacts/claim_graph.json` (NetworkX JSON format) for the report and the Streamlit contradiction network chart.
+The graph is serialised to `settings.artifacts_dir / "claim_graph.json"` (NetworkX node-link JSON format) for the report and the Streamlit contradiction network chart.
 
 ---
 

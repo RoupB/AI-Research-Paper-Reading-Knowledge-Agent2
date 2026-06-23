@@ -1,265 +1,677 @@
-Project Plan: ClaimCheck — An Agentic System for Reproducibility & Consensus Auditing of LoRA-Family Fine-Tuning Methods
+# ClaimCheck — LoRA Research Audit System
 
-1. Abstract: laimCheck is an agentic system designed to audit reproducibility and consensus across LoRA-family fine-tuning methods. It extracts structured claims from research papers, validates them against code repositories, and builds a cross-paper claim graph to identify agreements, contradictions, and condition-dependent truths.
+> **Automated reproducibility and cross-paper contradiction auditing for LoRA-variant fine-tuning papers**
 
-2. Problem Statement
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
+[![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
+[![Claude Sonnet](https://img.shields.io/badge/LLM-Claude%20Sonnet%204.6-blueviolet.svg)](https://www.anthropic.com)
+[![Streamlit](https://img.shields.io/badge/UI-Streamlit-red.svg)](https://streamlit.io)
+[![SQLite](https://img.shields.io/badge/database-SQLite-green.svg)](https://sqlite.org)
+[![Tests](https://img.shields.io/badge/tests-pytest-yellowgreen.svg)](https://pytest.org)
 
-Published papers on parameter-efficient fine-tuning (PEFT) methods — LoRA, QLoRA, DoRA, AdaLoRA, LoRA+, VeRA, and similar variants — make numerous claims about performance improvements over baseline LoRA, typically on shared benchmarks (GLUE, commonsense reasoning suites, instruction-tuning evals). However:
+---
 
+## Table of Contents
 
-Many of these claims are not independently verifiable against the accompanying code (hyperparameters differ, configs are incomplete, or the released code doesn't match the described method).
-Claims contradict each other — Method B claims to beat LoRA by X%, Method C claims to beat both, yet Method B and C are rarely compared directly, and when conditions (rank, dataset, model size) differ, "beats LoRA" may not mean the same thing across papers.
-Research engineers adopting these methods currently have no systematic way to know which claims hold up, under what conditions, and where the literature actually disagrees — they either trust the abstract or spend days manually digging through code and tables.
+1. [Overview](#overview)
+2. [Research Questions](#research-questions)
+3. [System Architecture](#system-architecture)
+4. [Agent Pipeline](#agent-pipeline)
+5. [Tech Stack](#tech-stack)
+6. [Project Structure](#project-structure)
+7. [Quick Start](#quick-start)
+8. [Configuration](#configuration)
+9. [Running the Pipeline](#running-the-pipeline)
+10. [Streamlit UI](#streamlit-ui)
+11. [MCP Server](#mcp-server)
+12. [Data Models](#data-models)
+13. [Testing](#testing)
+14. [API Cost Estimate](#api-cost-estimate)
+15. [Validation & Evaluation](#validation--evaluation)
+16. [Limitations](#limitations)
+17. [Ethical Considerations](#ethical-considerations)
+18. [Future Work](#future-work)
 
+---
 
-ClaimCheck is an agentic pipeline that (1) extracts structured, falsifiable claims from each paper and checks them against the paper's own released code (reproducibility/gap analysis), and (2) aggregates these structured claims across the full LoRA-variant literature to build a "claim graph" showing where methods agree, disagree, or are only comparable under specific conditions (cross-paper consensus mapping).
+## Overview
 
+Published PEFT papers (LoRA, QLoRA, DoRA, AdaLoRA, LoRA+, VeRA, …) make numerous claims about improvements over baseline LoRA on shared benchmarks. In practice:
 
-Some Challenges:
-- Claims are often not reproducible from released code.
-- Cross-paper contradictions exist without standardized comparison.
-- No systematic tool exists for validation and aggregation.
+- **Claims are not independently verifiable** — hyperparameters differ, configs are incomplete, or released code does not match the described method.
+- **Claims contradict each other** — "beats LoRA by X%" means different things when conditions (rank, dataset, model size) differ across papers.
+- **No systematic tool exists** to map where the literature agrees, disagrees, or is only conditionally comparable.
 
+**ClaimCheck** is a 7-agent agentic pipeline that autonomously:
 
-3. Objectives
-Build an automated pipeline for claim extraction and validation
-Identify reproducibility gaps between paper and code
-Construct a consensus graph across papers
-Provide structured outputs for researchers
+| Step | What it does |
+|---|---|
+| Discovers | Finds LoRA-variant papers on arXiv via a refinement loop |
+| Resolves | Locates the official GitHub repository for each paper |
+| Extracts | Parses PDFs → structured `BenchmarkClaim` records |
+| Audits | Reads repository code → `CodeFact` records |
+| Gaps | Reconciles paper claims vs. code → `ReproducibilityGap` records |
+| Contradictions | Two-pass (heuristic + LLM) cross-paper conflict detection with synonym normalisation |
+| Reports | Generates Markdown + HTML audit reports |
 
+All findings are persisted in a **SQLite** database and surfaced through an interactive **Streamlit** web application.
 
-3. Why This Is a Real and Novel Problem
+---
 
+## Research Questions
 
-Real pain point: Research engineers adopting PEFT methods regularly report that benchmark numbers don't reproduce, or that "SOTA" claims only hold under narrow, undisclosed conditions. This is currently solved (if at all) via slow, manual, ad-hoc investigation.
-Not addressed by existing tools: Literature search/summarization tools (Elicit, Consensus, SciSpace) summarize what papers say, not whether what they say is true relative to their own code, nor how claims relate across papers in a structured, conditional way.
-Publishable contribution shape: The output is not just a tool, but an empirical audit of a specific literature (LoRA variants) — e.g., "X% of claims in this literature are reproducible from released code/configs; Y% of 'beats LoRA' claims hold only under specific rank/dataset conditions." This is the kind of finding that fits reproducibility-focused workshops and "science of science" / meta-research venues.
+| # | Research Question | Hypothesis |
+|---|---|---|
+| **RQ1** | What fraction of benchmark claims in LoRA-variant papers can be reproduced from the released code? | H1: < 60% of critical claims are directly reproducible (hyperparameters, datasets, eval code all present and matching) |
+| **RQ2** | How frequently do cross-paper benchmark comparisons contradict each other on the same metric/dataset/base-model triple? | H2: ≥ 30% of same-setup comparisons show a direct numeric contradiction (> 2% relative difference) |
+| **RQ3** | How accurately can LLM agents extract structured benchmark claims from ML paper PDFs, compared to human annotation? | H3: Claim extraction achieves ≥ 0.80 F1 against human-annotated ground truth on a 25-paper validation set |
 
+These hypotheses are validated against a **hand-annotated validation set** (20–30 papers) stored in `tests/fixtures/validation_set.json`.
 
-4. Scope (v1)
+---
 
+## System Architecture
 
-Domain: LoRA and its direct variants (target list: LoRA, QLoRA, DoRA, AdaLoRA, LoRA+, VeRA, and ~10-20 closely related papers found during discovery).
-In scope:
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Entry Points                                   │
+│   python main.py run          │         streamlit run app/streamlit_app.py │
+└──────────────┬────────────────┴──────────────────────────────────────────┘
+               │ Interactive session (UserSessionOutput)
+               ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       LangGraph Pipeline (main.py)                       │
+│                                                                          │
+│  node_discover → node_resolve_repos → node_extract_claims               │
+│       → node_analyze_code → node_gap_analysis                           │
+│       → node_contradiction_mapping → node_report                        │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                 ▼
+       SQLite audit.db    artifacts/         LangGraph
+       (5 core tables +   (PDF cache,        checkpoint
+        2 MCP tables)      claim graph,       (SqliteSaver)
+                           reports)
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       Streamlit Web App (app/)                           │
+│   Home Dashboard · Search · Claims · Gaps · Contradictions · Report     │
+└─────────────────────────────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         MCP Server (mcp_server/)                         │
+│   server.py · schemas.py · auth.py · run_manager.py · tools/*.py        │
+│                       ↕ services.py (shared service layer)              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-Automated discovery of relevant papers + their code repos
-Structured claim extraction (what is claimed, on what benchmark, under what conditions, vs. what baseline)
-Code-vs-paper gap analysis (hyperparameters, method implementation, reproducibility of configs)
-Cross-paper claim graph: same-benchmark claims aligned, contradictions/conditions flagged
-A validation set of ~20-30 hand-annotated papers to measure agent accuracy
+---
 
+## Agent Pipeline
 
+### Agent 1 — PaperDiscoveryAgent
+**File:** `agents/paper_discovery.py`
 
-Out of scope (v1):
+Searches arXiv using query terms from the user session. Runs as a **refinement loop** (up to 3 rounds) — widening the search if fewer than `MIN_PAPERS_THRESHOLD` relevant papers are found. Uses an LLM relevance filter to tag each paper with its LoRA variant.
 
-Actually re-running training/experiments to verify numbers (too compute-heavy) — v1 is a static analysis of paper text + code, not re-execution
-The negative-results/internal-lab-notes system (#3) — noted as a future extension
-The original four-agent literature-review-to-IEEE-writing pipeline — superseded by this project, but components (paper search, summarization) are reusable
+### Agent 2 — RepoResolutionAgent
+**File:** `agents/repo_resolution.py`
 
+For each discovered paper, locates the official GitHub repository by scanning the PDF first pages and falling back to the GitHub search API. Papers with `confidence < 0.5` have their repo set to `null` and are skipped by downstream agents.
 
+### Agent 3 — ClaimExtractionAgent
+**File:** `agents/claim_extraction.py`
 
+Reads the full paper PDF (via `pdfplumber` / `pymupdf` fallback) and extracts every quantitative benchmark claim into structured `BenchmarkClaim` records: metric, dataset, base model, value, unit, conditions, and the verbatim source sentence.
 
+### Agent 4 — CodeAnalysisAgent
+**File:** `agents/code_analysis.py`
 
-5. System Architecture
+Fetches the GitHub repository tree and reads relevant files (`train*.py`, `run*.py`, `config*.yaml`, etc.) to extract `CodeFact` records — hardcoded hyperparameters, dataset loading paths, metrics logged, and eval scripts present or absent.
 
-Built on LangGraph (Python), as a checkpointed graph with both sequential and agentic-loop sections.
+### Agent 5 — GapAnalysisAgent
+**File:** `agents/gap_analysis.py`
 
-                    ┌─────────────────────────┐
-                    │   Paper Discovery Agent   │  (agentic loop, refines
-                    │   (arXiv/Semantic Scholar)│   search until enough
-                    └───────────┬───────────────┘   relevant papers found)
-                                │
-                    ┌───────────▼───────────────┐
-                    │  Code Repo Resolution Agent │  (finds + clones/fetches
-                    │  (GitHub search, link       │   associated code repo
-                    │   extraction from paper)    │   for each paper)
-                    └───────────┬───────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                                     ▼
-   ┌─────────────────────┐               ┌─────────────────────┐
-   │  Claim Extraction    │               │  Code Analysis Agent │
-   │  Agent (per paper)   │               │  (per paper's repo)  │
-   │  - claims, baselines,│               │  - implementation    │
-   │    conditions, metric│               │  - configs/hparams   │
-   └───────────┬──────────┘               └──────────┬───────────┘
-              │                                       │
-              └───────────────┬───────────────────────┘
-                                ▼
-                    ┌─────────────────────────┐
-                    │  Gap Analysis Agent       │  (reconciles claims
-                    │  (per paper)              │   vs. code → structured
-                    └───────────┬───────────────┘   "gap report")
-                                │
-                                ▼
-                    ┌─────────────────────────┐
-                    │  Cross-Paper Aggregation  │  (builds claim graph:
-                    │  & Contradiction Agent    │   agreements, conflicts,
-                    │  (across all papers)      │   conditional claims)
-                    └───────────┬───────────────┘
-                                │
-                                ▼
-                    ┌─────────────────────────┐
-                    │  Report Generation        │  (per-paper gap reports +
-                    │  (human-readable output)  │   overall consensus map)
-                    └─────────────────────────┘
+Compares the paper's `BenchmarkClaim` records against its `CodeFact` records to produce `ReproducibilityGap` records. Gap types: `missing_code`, `value_mismatch`, `dataset_mismatch`, `condition_undisclosed`, `metric_not_implemented`. Severity: `critical`, `major`, `minor`.
 
-Agent-by-agent description
+### Agent 6 — ContradictionMappingAgent
+**File:** `agents/contradiction_mapping.py`
 
+Corpus-level agent (no per-paper input — loads everything from the DB). Uses a **two-pass approach**:
 
-Paper Discovery Agent (agentic loop — reused/adapted from earlier design): searches arXiv/Semantic Scholar for LoRA-variant papers, refines query if results are too narrow/broad/off-topic, until a target set (e.g., 15-25 papers) is reached.
-Code Repo Resolution Agent: for each paper, locates the associated GitHub repo (often linked in the abstract/footer, sometimes requires searching). Flags papers with no usable code — this itself is a data point.
-Claim Extraction Agent: reads each paper and extracts a structured list of claims in a fixed schema: {method, baseline, benchmark, metric, claimed_value, baseline_value, conditions (rank, model, dataset size, etc.)}. This structured schema is what makes cross-paper comparison possible later.
-Code Analysis Agent: explores the repo's structure, config files, and key implementation files; extracts what hyperparameters/configs are actually specified, and a structural summary of how the method is implemented (e.g., does the code actually implement the described rank-adaptive mechanism, or a simplified version).
-Gap Analysis Agent: takes claim extraction + code analysis for a single paper and produces a gap report — does the code support reproducing the claimed numbers (are configs present/complete), does the implementation match the method description, are there discrepancies (e.g., paper claims rank=8 but default config uses rank=16).
-Cross-Paper Aggregation & Contradiction Agent: takes all papers' structured claims (from step 3) and builds a claim graph — clusters claims by (benchmark, baseline) pairs, identifies where multiple papers report different numbers for "the same" comparison, and surfaces the conditions under which each claim was made (so "Method B beats LoRA" and "Method C doesn't beat LoRA" might both be true under different ranks/datasets — the agent's job is to surface this nuance rather than flatten it).
-Report Generation: compiles per-paper gap reports and the overall claim graph into a structured, human-readable output (and structured JSON/data for analysis).
+| Pass | Method | Detects |
+|---|---|---|
+| **Pass 1 — Heuristic** | Rule-based, no LLM | `direct_numeric`: flags any cross-paper pair with ≥ 1% relative diff or ≥ 0.5 absolute diff |
+| **Pass 2 — LLM** | `call_llm_json()` per cluster | `conditional_flip`, `dataset_scope`, numeric misses from Pass 1 |
 
+Before clustering, metric/dataset/model strings are **normalised through synonym tables** (e.g. `"acc"→"accuracy"`, `"sst2"→"sst-2"`, `"llama-7b-hf"→"llama-7b"`) to prevent false split-clusters from spelling variants. A `seen_pairs` frozenset deduplicates findings across both passes.
 
+The resulting **NetworkX DiGraph** (nodes = claims, edges = contradictions) is saved to `artifacts/claim_graph.json`.
 
-6. Why Agents (and Not Just an Augmented LLM Call)
+**Severity thresholds:** `high` ≥ 5% rel diff or rank flip · `medium` 1–5% · `low` subtle discrepancy
 
-This is the key justification, since a single well-prompted LLM call with retrieval could superficially "do" parts of this. Here's why a multi-agent architecture is genuinely needed, not just nice-to-have:
+### Agent 7 — ReportGenerationAgent
+**File:** `agents/report_generation.py`
 
+Aggregates all DB records and produces dual-format reports:
+- `reports/audit_report.md` — human-readable Markdown
+- `reports/audit_report.html` — rendered HTML via Jinja2 template
 
-Heterogeneous, multi-step information gathering per paper: For each paper, the system needs to (a) find the paper, (b) find its code repo — which may require a separate web search if not directly linked, (c) read the paper, (d) explore a code repository's file structure to find the relevant files (not just README), (e) cross-reference specific numbers/configs between the two. This is not a single retrieval-then-generate step — it's a sequence of dependent actions where later steps depend on the outcomes of earlier ones (e.g., which files to look at in the repo depends on what the paper's method section describes). This is the core definition of an agentic task: the LLM needs to decide what to look at next based on what it's found so far, not have everything handed to it in one context window.
-The agentic refinement loop in discovery is load-bearing, not decorative: A single-pass search for "LoRA variants" will return a mix of relevant, tangential, and noise results. The discovery agent needs to evaluate its own results and decide whether to broaden, narrow, or pivot the search — a feedback loop that a single LLM call cannot perform (it has no "results" to react to within one call).
-Separation of concerns improves reliability and debuggability: Claim extraction (reading prose, understanding numbers and conditions) and code analysis (reading file structures, configs, implementation details) are different skills with different failure modes. Combining them into one mega-prompt would mean a single failure mode contaminates everything and makes errors hard to isolate. As separate agents/nodes with structured intermediate outputs (the claim schema, the code analysis schema), each step's output can be validated, logged, and debugged independently — critical for a project whose output needs to be trustworthy enough to publish.
-The cross-paper aggregation step genuinely requires all per-paper outputs as input: This is inherently a multi-document reasoning task that depends on the structured outputs of many prior agent runs — it cannot happen "in the same breath" as any single paper's analysis. This is a natural multi-stage pipeline, not something a single augmented LLM call (even with a huge context window) handles well, because the comparison requires normalized, structured data from each paper, not raw text from all papers dumped together.
-Context window and cost management: Reading 20+ full papers and their repos in one context would be enormous and expensive, and would force the model to "remember" everything at once. Per-paper agents with structured outputs mean each step operates on a manageable amount of context, and the expensive "read everything" step never has to happen — only the structured summaries get aggregated.
-Iterative, conditional control flow: The discovery loop (refine until enough papers found, capped at N attempts), the "no code available → skip code analysis, flag it" branch, and the aggregation step (which only runs once all per-paper analyses are done) are all conditional and stateful — exactly what LangGraph's graph/state model is designed for, and what a single LLM call fundamentally cannot express.
+---
 
+## Tech Stack
 
-In short: a single augmented LLM call can summarize a paper you hand it. It cannot go find the right paper, find its code, decide what part of the code is relevant to check, compare that against what 19 other papers claimed, and flag the specific conditions under which contradictory claims are each true. That requires a system that takes actions, observes results, and adapts — i.e., agents.
+| Layer | Technology | Purpose |
+|---|---|---|
+| Language | Python 3.11 | Async support, rich ML ecosystem |
+| LLM SDK | `anthropic` (claude-sonnet-4-6) | Structured JSON extraction, long-context PDF analysis |
+| LLM helpers | `agents/llm.py` | `make_client()`, `call_llm_json()` with mandatory retry pattern |
+| Agent orchestration | **LangGraph** | Checkpointed state graph, conditional edges, agentic loops |
+| Service layer | `services.py` | Shared business logic for pipeline and MCP |
+| ArXiv access | `arxiv` PyPI + `httpx` | Paper metadata + PDF download |
+| GitHub access | `PyGithub` + `httpx` | Repo tree traversal and file fetch |
+| PDF parsing | `pdfplumber` + `pymupdf` | Table extraction, section detection |
+| Database | `aiosqlite` (SQLite) | Lightweight, file-portable, WAL mode |
+| Claim graph | `networkx` | Cross-paper contradiction graph |
+| Data validation | `pydantic` v2 | Schema enforcement at every agent boundary |
+| Configuration | `pydantic-settings` + `.env` | Typed, validated secrets at startup |
+| CLI | `typer` | `run` / `ui` commands |
+| Frontend | `streamlit` | Interactive web UI |
+| Charts | `plotly` | Reproducibility and contradiction visualizations |
+| Reporting | `jinja2` + `markdown` | HTML and Markdown report generation |
+| Logging | `structlog` | JSON-structured per-agent logs |
+| Testing | `pytest` + `pytest-asyncio` | Unit + integration tests |
+| Interoperability | **MCP server** | Standardized tool interface for external clients |
+| Deployment | Streamlit Community Cloud | Free public hosting, auto-deploy from GitHub |
 
-7. Key Benefits
+---
 
+## Project Structure
 
-For research engineers: A concrete, queryable map of "what's actually been shown about LoRA variants, under what conditions, and how reproducible it is" — replacing days of manual digging with a structured report.
-For the research community: An empirical reproducibility audit of an actively-used literature, surfacing systemic issues (e.g., "60% of 'beats LoRA' claims lack complete configs for reproduction") that individual papers/reviewers don't surface.
-As a publishable contribution: The combination of (a) a novel agentic methodology for automated reproducibility auditing, and (b) concrete empirical findings about a specific, relevant literature, fits the shape of accepted papers in reproducibility/meta-research venues and ML workshops.
-As a reusable framework: The claim-extraction schema, gap-analysis pattern, and contradiction-mapping approach generalize to other PEFT/method families beyond LoRA — a natural "future work" extension.
+```
+lora-audit/
+├── .env                          # Local secrets (gitignored)
+├── .env.example                  # Committed template
+├── config.py                     # pydantic-settings config loader
+├── models.py                     # All Pydantic v2 data models
+├── main.py                       # LangGraph graph + typer CLI
+├── services.py                   # Service layer (shared by pipeline + MCP)
+│
+├── session/
+│   └── user_session.py           # Interactive + non-interactive scoping
+│
+├── agents/
+│   ├── base_agent.py             # run_with_limit, with_retry, get_logger
+│   ├── llm.py                    # make_client(), call_llm(), call_llm_json()
+│   ├── paper_discovery.py        # Agent 1
+│   ├── repo_resolution.py        # Agent 2
+│   ├── claim_extraction.py       # Agent 3
+│   ├── code_analysis.py          # Agent 4
+│   ├── gap_analysis.py           # Agent 5
+│   ├── contradiction_mapping.py  # Agent 6 (two-pass, synonym normalisation)
+│   └── report_generation.py      # Agent 7
+│
+├── tools/
+│   ├── arxiv_tool.py             # search_arxiv(), fetch_paper_text()
+│   ├── github_tool.py            # resolve_repo(), fetch_repo_tree(), fetch_file()
+│   └── pdf_tool.py               # SYNC: fetch_and_cache_pdf(), parse_tables(), extract_sections()
+│
+├── db/
+│   ├── schema.sql                # Table definitions (5 core + 2 MCP tables)
+│   ├── init_db.py                # Database initialisation
+│   └── queries.py                # All async DB operations (no SQL in agents)
+│
+├── mcp_server/
+│   ├── server.py                 # MCP server bootstrap
+│   ├── schemas.py                # Request/response Pydantic models
+│   ├── auth.py                   # Token auth + rate limiting
+│   ├── run_manager.py            # Run lifecycle helpers
+│   └── tools/
+│       ├── pipeline.py           # start_pipeline_run, get_run_status, cancel_run
+│       ├── papers.py             # discover_papers, resolve_repos
+│       ├── claims.py             # extract_claims, list_claims
+│       ├── code.py               # analyze_code
+│       ├── gaps.py               # analyze_gaps, list_gaps
+│       ├── contradictions.py     # map_contradictions, list_contradictions
+│       └── report.py             # generate_report
+│
+├── app/
+│   ├── streamlit_app.py          # Home dashboard (KPI metrics)
+│   ├── pages/
+│   │   ├── 01_Search.py          # Trigger pipeline + monitor progress
+│   │   ├── 02_Claims.py          # Browse claims + manual annotation
+│   │   ├── 03_Gaps.py            # Reproducibility gap viewer
+│   │   ├── 04_Contradictions.py  # Contradiction network graph
+│   │   └── 05_Report.py          # Download audit report
+│   └── components/
+│       ├── charts.py             # Plotly chart helpers (return go.Figure only)
+│       └── db_reader.py          # Read-only sync SQLite wrappers for Streamlit
+│
+├── templates/
+│   ├── report.md.j2              # Markdown report template
+│   └── report.html.j2            # HTML report template
+│
+├── tests/
+│   ├── conftest.py               # Shared fixtures (test_db, mock_llm, sample_paper)
+│   ├── test_db.py
+│   ├── test_user_session.py
+│   ├── test_arxiv_tool.py
+│   ├── test_github_tool.py
+│   ├── test_pdf_tool.py
+│   ├── test_paper_discovery.py
+│   ├── test_repo_resolution.py
+│   ├── test_claim_extraction.py
+│   ├── test_code_analysis.py
+│   ├── test_gap_analysis.py
+│   ├── test_contradiction_mapping.py
+│   ├── test_report_generation.py
+│   ├── test_mcp.py
+│   ├── test_pipeline_smoke.py
+│   └── test_validation_set.py
+│
+├── data/
+│   └── audit.db                  # Created at runtime (gitignored)
+├── artifacts/
+│   ├── pdfs/                     # PDF text cache
+│   └── claim_graph.json          # NetworkX node-link graph (written by Agent 6)
+├── logs/
+└── reports/                      # Generated audit reports
+```
 
+---
 
-8. Validation Plan
+## Quick Start
 
+### Prerequisites
 
-Hand-annotate ~20-30 papers (a subset of the full set) with ground-truth claims, conditions, and known gaps (where you, as the human, identify discrepancies between paper and code).
-Measure agent precision/recall on: claim extraction accuracy, gap detection accuracy (true gaps found vs. false positives), and contradiction-detection accuracy (does the aggregation agent correctly identify when two papers' claims are/aren't comparable).
-This validation set is also a deliverable — a small benchmark for "can an LLM agent audit ML paper reproducibility," which is itself citable.
+- Python 3.11
+- An [Anthropic API key](https://console.anthropic.com/)
+- A [GitHub Personal Access Token](https://github.com/settings/tokens) with `read:public_repo` scope
 
+### 1. Clone and install
 
-9. Build Order / Milestones
+```bash
+git clone <repo-url>
+cd lora-audit
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
 
+pip install -r requirements.txt
+```
 
-M1 — Discovery + Repo Resolution: Get the discovery agent finding ~20 LoRA-variant papers + resolving their code repos. Output: a list of (paper, repo, repo-exists Y/N).
-M2 — Claim Extraction: Build and test the claim extraction schema on a handful of papers; refine schema based on what's actually extractable.
-M3 — Code Analysis + Gap Analysis: For papers with code, build the code analysis agent and gap-analysis reconciliation. Start hand-annotating the validation set in parallel.
-M4 — Cross-Paper Aggregation: Once several papers have structured claims, build the contradiction/consensus mapping agent.
-M5 — Validation & Report: Run full pipeline on all ~20 papers, compare against hand-annotated validation set, compute accuracy metrics, generate final report (per-paper + aggregate).
-M6 — Write-up: Frame findings + methodology as a paper/workshop submission.
+### 2. Configure secrets
 
+```bash
+cp .env.example .env
+# Edit .env and fill in ANTHROPIC_API_KEY and GITHUB_TOKEN
+```
 
-10. Open Questions to Resolve as You Go
+### 3. Initialise the database
 
+```bash
+python db/init_db.py
+```
 
-Exact schema for "claim" and "condition" — will need iteration once you see real extracted claims.
-How to handle papers with code in non-Python or unconventional repo structures (some PEFT papers use Jupyter notebooks, others full training frameworks).
-Threshold/definition for "contradiction" vs. "different conditions" in the aggregation agent — this is somewhat subjective and may need a human-reviewed rubric.
-How much of the validation annotation can be semi-automated (e.g., using one LLM call to propose gaps for human review/correction) vs. fully manual.
+### 4. Verify the setup
 
+```bash
+python -c "from config import settings; print('Config OK:', settings.anthropic_model)"
+```
 
-11. Key Components
-Paper Discovery Agent
-Code Repository Resolver
-Claim Extraction Agent
-Code Analysis Agent
-Gap Analysis Agent
-Cross-Paper Aggregator
-Report Generator
+---
 
-12. Data Schema
+## Configuration
 
-Claim Schema
-{
-  method: str,
-  baseline: str,
-  dataset: str,
-  metric: str,
-  claimed_value: float,
-  baseline_value: float,
-  conditions: {
-    rank: int,
-    model: str,
-    dataset_size: str
+All settings are loaded from `.env` via `config.py` (pydantic-settings). Missing required keys raise `ValidationError` at startup.
+
+```dotenv
+# ── Anthropic ─────────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_MAX_TOKENS=8192
+ANTHROPIC_TEMPERATURE=0.1          # low for structured extraction
+
+# ── GitHub ────────────────────────────────────────────────────────────────
+GITHUB_TOKEN=ghp_...               # read:public_repo scope
+
+# ── ArXiv ─────────────────────────────────────────────────────────────────
+ARXIV_MAX_RESULTS_PER_QUERY=50
+ARXIV_RATE_LIMIT_SLEEP=1.0
+
+# ── Pipeline ──────────────────────────────────────────────────────────────
+PIPELINE_MAX_PAPERS=100
+PIPELINE_CONCURRENCY=3             # max parallel agent tasks
+SKIP_PAPERS_WITHOUT_REPO=true
+
+# ── Storage ───────────────────────────────────────────────────────────────
+DB_PATH=./data/audit.db
+ARTIFACTS_DIR=./artifacts
+REPORT_OUTPUT_DIR=./reports
+PDF_CACHE_DIR=./artifacts/pdfs
+
+# ── Logging ───────────────────────────────────────────────────────────────
+LOG_LEVEL=INFO                     # DEBUG | INFO | WARNING | ERROR
+
+# ── MCP (optional) ────────────────────────────────────────────────────────
+MCP_ENABLED=true
+MCP_TRANSPORT=stdio
+MCP_AUTH_TOKEN=
+MCP_RATE_LIMIT_PER_MIN=60
+```
+
+---
+
+## Running the Pipeline
+
+### Interactive CLI (recommended)
+
+```bash
+python main.py run --max 30 --output reports/
+```
+
+An interactive session starts automatically, asking for your research question (e.g. *"Which LoRA variants work best for instruction tuning of LLaMA models?"*). The session uses one LLM call to extract search queries and a clarifying question if needed.
+
+### Resume from last checkpoint
+
+```bash
+python main.py run --max 30 --resume
+```
+
+LangGraph's `SqliteSaver` checkpointer means interrupted runs restart from the last completed node — no re-processing of already-completed papers.
+
+### Debug mode
+
+```bash
+LOG_LEVEL=DEBUG python main.py run --max 5
+```
+
+### Non-interactive (scripting)
+
+Use `run_user_session_from_text()` programmatically (bypasses stdin — used by the Streamlit UI):
+
+```python
+from session.user_session import run_user_session_from_text
+
+session = await run_user_session_from_text(
+    "QLoRA vs LoRA on MT-Bench",
+    variants=["QLoRA", "LoRA"],
+)
+```
+
+---
+
+## Streamlit UI
+
+```bash
+python main.py ui
+# or directly:
+streamlit run app/streamlit_app.py
+```
+
+| Page | Path | What it shows |
+|---|---|---|
+| **Home** | `/` | KPI metrics: papers audited, claims, gaps, contradictions |
+| **Search** | `01_Search` | Trigger a new pipeline run, monitor progress |
+| **Claims** | `02_Claims` | Filter/browse all `BenchmarkClaim` records; add manual annotations |
+| **Gaps** | `03_Gaps` | Reproducibility gap analysis with severity breakdown per paper |
+| **Contradictions** | `04_Contradictions` | Force-directed contradiction network graph |
+| **Report** | `05_Report` | Download the full audit report (MD or HTML) |
+
+---
+
+## MCP Server
+
+ClaimCheck exposes a **Model Context Protocol** server for external integrations. The same `services.py` layer is used — no business logic is duplicated.
+
+### Start the server
+
+```bash
+# stdio transport (default)
+python -m mcp_server.server
+
+# HTTP transport
+MCP_TRANSPORT=http MCP_PORT=8765 python -m mcp_server.server
+```
+
+### Available tools
+
+| Tool | Mutating | Description |
+|---|---|---|
+| `start_pipeline_run` | Yes | Queue a new audit run |
+| `get_run_status` | No | Poll progress by `run_id` |
+| `cancel_run` | Yes | Cancel a queued or running pipeline |
+| `discover_papers` | Yes | Run paper discovery for a run |
+| `extract_claims` | Yes | Run claim extraction for one paper |
+| `analyze_code` | Yes | Run code analysis for one paper |
+| `analyze_gaps` | Yes | Run gap analysis for one paper |
+| `map_contradictions` | Yes | Run corpus-level contradiction mapping |
+| `generate_report` | Yes | Generate the audit report |
+| `list_claims` / `list_gaps` / `list_contradictions` | No | Query findings |
+
+Mutating tools require the `MCP_AUTH_TOKEN` header. All tool calls are logged to the `mcp_tool_calls` table with latency and status.
+
+---
+
+## Data Models
+
+All models are defined in `models.py` (Pydantic v2). Every agent validates its input and output against these schemas.
+
+### Core Models
+
+```
+Paper                 arxiv_id, title, authors, abstract, pdf_url, repo_url,
+                      lora_variant_tag, status (DISCOVERED→DONE|FAILED),
+                      citation_count (used as pivot weight for large clusters)
+
+BenchmarkClaim        paper_id, metric, dataset, model_base, reported_value,
+                      unit, conditions{}, is_conditional, claim_confidence,
+                      source_section, raw_text
+
+CodeFact              paper_id, repo_url, fact_type (hyperparameter|dataset|
+                      metric_logged|missing_eval), key, value, file_path,
+                      line_range, evidence
+
+ReproducibilityGap    gap_id, paper_id, claim_id, fact_id, gap_type
+                      (missing_code|value_mismatch|dataset_mismatch|
+                       condition_undisclosed|metric_not_implemented),
+                      severity (critical|major|minor), description,
+                      paper_value, code_value
+
+Contradiction         contradiction_id, paper_a_id, paper_b_id,
+                      claim_a_id, claim_b_id,
+                      contradiction_type (direct_numeric|conditional_flip|
+                                          dataset_scope),
+                      severity (high|medium|low), description
+```
+
+### Pipeline Status Progression
+
+```
+DISCOVERED → REPO_RESOLVED → CLAIMS_EXTRACTED → CODE_ANALYZED → GAPS_ANALYZED → DONE
+                                                                               ↘ FAILED
+```
+
+---
+
+## Testing
+
+```bash
+# Run the full test suite
+pytest tests/ -v
+
+# Run a specific module
+pytest tests/test_contradiction_mapping.py -v
+
+# Run with debug logging
+LOG_LEVEL=DEBUG pytest tests/ -s
+
+# Run the end-to-end smoke test (uses live APIs — requires .env)
+pytest tests/test_pipeline_smoke.py -v -s
+```
+
+### Test infrastructure
+
+- All tests use the `test_db` fixture (isolated in-memory SQLite per test) and `mock_llm` fixture (injectable `AsyncAnthropic` client returning fixture JSON) from `tests/conftest.py`.
+- No test makes a live LLM call except `test_pipeline_smoke.py`.
+- `test_contradiction_mapping.py` verifies: detection found, single-paper cluster skipped, empty corpus, and hallucinated claim IDs discarded (heuristic still fires).
+
+---
+
+## API Cost Estimate
+
+For a **30-paper run** (default `PIPELINE_MAX_PAPERS`):
+
+| Agent | Tokens / paper | × 30 papers | Subtotal |
+|---|---|---|---|
+| PaperDiscovery | ~2,000 | 30 | 60K |
+| RepoResolution | ~4,000 | 30 | 120K |
+| ClaimExtraction | ~30,000 | 30 | 900K |
+| CodeAnalysis | ~20,000 | 30 | 600K |
+| GapAnalysis | ~8,000 | 30 | 240K |
+| ContradictionMapping | ~2,000 × ~50 clusters | — | 100K |
+| ReportGeneration | ~4,000 | 1 | 4K |
+| **Total** | | | **~2.0M tokens** |
+
+At Claude Sonnet 4.6 pricing (~$3/M input, ~$15/M output, 80/20 split): **$7–12 per 30-paper run**.
+
+PDF text is cached to `artifacts/pdfs/` — re-runs save ~50% of ClaimExtraction and CodeAnalysis costs.
+
+---
+
+## Validation & Evaluation
+
+ClaimCheck ships with a hand-annotation workflow for measuring agent accuracy against the research hypotheses.
+
+### Validation set format (`tests/fixtures/validation_set.json`)
+
+```json
+[
+  {
+    "arxiv_id": "2106.09685",
+    "ground_truth_claims": [
+      {
+        "metric": "accuracy", "dataset": "GLUE/MNLI",
+        "model_base": "RoBERTa-large", "reported_value": 90.2,
+        "conditions": {"rank": "8"}, "is_conditional": true
+      }
+    ],
+    "known_gaps": [
+      {
+        "gap_type": "condition_undisclosed", "severity": "major",
+        "description": "Paper uses rank=8 but default config sets rank=16"
+      }
+    ],
+    "known_contradictions": []
   }
-}
+]
+```
 
+### Target metrics
 
-Gap Report Schema
+| Metric | Target |
+|---|---|
+| Claim extraction precision | ≥ 0.85 |
+| Claim extraction recall | ≥ 0.80 |
+| Gap detection F1 | ≥ 0.75 |
+| Contradiction precision | ≥ 0.70 |
+| Pipeline coverage (no FAILED status) | ≥ 0.85 |
 
-{
-  paper_id: str,
-  reproducible: bool,
-  missing_configs: list,
-  inconsistencies: list
-}
+```bash
+# Run validation evaluation
+pytest tests/test_validation_set.py -v
+```
 
+---
 
+## LoRA Variant Taxonomy (v1)
 
+| Tag | Paper | ArXiv ID | Year |
+|---|---|---|---|
+| `LoRA` | LoRA: Low-Rank Adaptation of Large Language Models | 2106.09685 | 2021 |
+| `QLoRA` | QLoRA: Efficient Finetuning of Quantized LLMs | 2305.14314 | 2023 |
+| `AdaLoRA` | AdaLoRA: Adaptive Budget Allocation for PEFT | 2303.10512 | 2023 |
+| `DoRA` | DoRA: Weight-Decomposed Low-Rank Adaptation | 2402.09353 | 2024 |
+| `LoRA+` | LoRA+: Efficient Low Rank Adaptation of LLMs | 2402.12354 | 2024 |
+| `VeRA` | VeRA: Vector-based Random Matrix Adaptation | 2310.11454 | 2023 |
+| `DyLoRA` | DyLoRA: Parameter-Efficient Tuning with Dynamic Ranks | 2210.07558 | 2022 |
+| `LoftQ` | LoftQ: LoRA-Fine-Tuning-Aware Quantization | 2310.08659 | 2023 |
+| `LoRA-FA` | LoRA-FA: Memory-Efficient LLM Fine-Tuning | 2308.03303 | 2023 |
+| `GLoRA` | One-for-All: Generalized LoRA for Parameter-Efficient Fine-Tuning | 2306.07967 | 2023 |
+| `rsLoRA` | A Rank Stabilization Scaling Factor for Fine-Tuning with LoRA | 2312.03732 | 2023 |
+| `MoLoRA` | Mixture of LoRA Experts | 2402.11453 | 2024 |
+| `FLoRA` | Flora: Low-Rank Adapters Are Secretly Gradient Compressors | 2402.03293 | 2024 |
 
-13. Technology Stack
-- LangGraph (agent orchestration)
-- Python
-- OpenAI / Azure OpenAI APIs
-- GitHub API
-- ArXiv / Semantic Scholar APIs
-- Pandas / NetworkX (graph construction)
+Papers not on this list are tagged `OTHER_LORA` and included but flagged for review.
 
+---
 
+## Deployment (Streamlit Community Cloud)
 
-14. Evaluation Metrics
-- Claim Extraction Accuracy (Precision / Recall)
-- Gap Detection Accuracy
-- Contradiction Detection Accuracy
-- Coverage (% papers processed successfully)
+```bash
+# 1. Push repo to GitHub (public)
+git push origin main
 
+# 2. Go to https://share.streamlit.io → "New app"
+# 3. Select repo, branch: main, entrypoint: app/streamlit_app.py
+# 4. Add secrets in "Advanced settings":
+#      ANTHROPIC_API_KEY = "sk-ant-..."
+#      GITHUB_TOKEN      = "ghp_..."
+# 5. Click Deploy
+```
 
-15. Risks & Mitigation
+The deployed app shows a **pre-computed demo dataset** (20 papers committed to `data/audit.db`). Full pipeline runs are available via the CLI locally.
 
-Risks
-- Inconsistent paper formats
-- Missing or incomplete code repositories
-- LLM hallucination in extraction
+---
 
-Mitigation
-- Use structured prompting
-- Add validation layers per agent
-- Maintain human-annotated benchmark set
+## Limitations
 
+| Limitation | Detail |
+|---|---|
+| Static analysis only | Code is read but not executed; silently-failing configs are indistinguishable from correct ones |
+| PDF parsing quality | ~10–15% of arXiv PDFs require the `pymupdf` fallback; some scanned papers may still produce low-quality text |
+| LLM accuracy ceiling | Unusual units or non-standard metric names may be miscategorised |
+| Code availability | ~20–30% of LoRA papers have no released code; these reach `status=FAILED` at `code_analyzed` |
+| Contradiction threshold | The 1% relative-difference threshold for `direct_numeric` is configurable but ultimately a design choice |
+| v1 scope | Only LoRA-family PEFT methods; GPT-style prefix tuning, adapters, and prompt tuning are out of scope |
 
+---
 
-14. Limitations:
-No actual experiment execution (static analysis only)
-Dependent on availability of code
-Limited to LoRA-family methods (v1)
+## Ethical Considerations
 
+- **Fair representation** — Gap reports describe discrepancies in code/paper alignment, not author intent. No language implies fraud or misconduct.
+- **Attribution** — Per-paper reports identify paper title + arXiv ID; individual authors are not named in negative contexts.
+- **Uncertainty disclosure** — All LLM-generated findings are labelled as "automated analysis" and are hypotheses for human verification, not definitive conclusions.
+- **Reproducibility of ClaimCheck itself** — Prompt templates, validation set, and evaluation scripts are committed so ClaimCheck's own methodology can be audited.
+- **Data use** — Only publicly available arXiv papers and public GitHub repositories are accessed. No private repos, paywalled content, or personal data.
 
+---
 
-15. Ethical Considerations:
-Ensure fair representation of papers
-Avoid misinterpretation of claims
-Transparency in limitations of automated analysis
+## Future Work
 
+| Extension | Notes |
+|---|---|
+| Semantic Scholar integration | Add `tools/semantic_scholar_tool.py`; extend `PaperDiscoveryAgent` |
+| Non-LoRA PEFT methods | Add `peft_family` field to `papers` table; parameterise agent prompts |
+| Experiment re-execution | New agent that clones repo and runs training with detected config |
+| Real-time pipeline progress | `st.empty()` + LangGraph streaming callbacks to push node events to UI |
+| Multi-user deployment | Replace SQLite with PostgreSQL; add `user_id` to all tables |
+| ArXiv alerting | Scheduled cron runs `PaperDiscoveryAgent` weekly; new papers auto-queued |
+| CSV / JSON export | `st.download_button` on all Streamlit pages |
 
+---
 
-16. Future Work:
-Extend to other ML domains
-Integrate experiment re-execution
-Add user-facing dashboard
+## Novel Academic Contributions
 
+1. **A formal, reproducible methodology** for automated reproducibility auditing of PEFT literature — the first system to go beyond manual checking or paper summarization.
+2. **An empirical dataset** — a structured corpus of 500+ benchmark claims with reproducibility labels and cross-paper contradiction tags across 20+ LoRA-variant papers, publishable as a standalone dataset contribution.
+3. **A conditional claim schema** (`BenchmarkClaim.conditions` dict) that captures the hyperparameter context under which each claim is made — enabling comparison of "beats LoRA by 3%" claims that are only valid under specific rank/lr/dataset combinations.
 
-17. Conclusion:
-ClaimCheck addresses a critical gap in ML reproducibility by combining agentic workflows with structured analysis, enabling scalable meta-research across scientific literatur
+---
 
-
+*ClaimCheck — IISc Deep Learning Project · Built with LangGraph + Anthropic Claude + Streamlit*

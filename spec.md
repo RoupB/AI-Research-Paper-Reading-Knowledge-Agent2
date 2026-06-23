@@ -806,6 +806,74 @@ _configure_structlog()
 
 ---
 
+## Shared LLM Helpers — `agents/llm.py`
+
+All agents import their LLM client and JSON-call helper from this module. **Never inline Anthropic client construction or the JSON retry pattern in agent code.**
+
+```python
+# agents/llm.py
+
+from __future__ import annotations
+import json
+import re
+from typing import Any
+
+from anthropic import AsyncAnthropic
+from config import settings
+
+
+def make_client() -> AsyncAnthropic:
+    """Construct an AsyncAnthropic client from settings."""
+    return AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+
+async def call_llm(
+    client: AsyncAnthropic,
+    system: str,
+    user: str,
+    *,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> str:
+    """Single Anthropic message call returning the raw text of the first content block."""
+
+
+async def call_llm_json(
+    client: AsyncAnthropic,
+    system: str,
+    user: str,
+    *,
+    max_tokens: int | None = None,
+) -> Any:
+    """
+    Call the LLM and parse JSON output, applying the mandatory retry pattern:
+    on the first JSONDecodeError, retry once with a 'JSON only' instruction.
+    A second failure raises JSONDecodeError for the caller to handle.
+
+    Strips ```json ... ``` markdown fences before parsing.
+    """
+```
+
+**Usage pattern in every agent:**
+```python
+from agents.llm import call_llm_json, make_client
+
+class MyAgent:
+    def __init__(self, client=None):
+        self.client = client or make_client()
+
+    async def _call(self, system: str, user: str) -> Any:
+        return await call_llm_json(self.client, system, user)
+```
+
+**Why a separate module:**
+- Keeps the mandatory JSON retry in one place — agents cannot accidentally forget it
+- `make_client()` ensures the API key is read from `settings`, never hardcoded
+- `_strip_fences()` handles models that occasionally wrap output in ` ```json ``` ` fences
+- Simplifies test injection: pass a mock `AsyncAnthropic` client at construction time
+
+---
+
 ## Agents
 
 ### User Session — Interactive Research Scoping
@@ -1296,12 +1364,7 @@ user: |
 
 **Responsibility:** Across all papers, find pairs of claims that contradict each other — same metric on same dataset with conflicting values, or claims that flip under conditions the other paper does not acknowledge.
 
-**Input:**
-```python
-class ContradictionMappingInput(BaseModel):
-    all_claims: list[BenchmarkClaim]    # full corpus, all papers
-    all_papers: list[Paper]
-```
+**Input:** None — the agent loads the full corpus directly from the database via `queries.get_all_claims()` and `queries.get_all_papers()`. `run()` takes no arguments.
 
 **Output:**
 ```python
@@ -1311,30 +1374,55 @@ class ContradictionMappingOutput(BaseModel):
     papers_involved: list[str]
 ```
 
-**Tools called:** None (runs over in-memory/DB-loaded data)
+**Tools called:** None (loads from DB, writes contradictions back to DB, serialises claim graph to file)
 
-**Strategy:** Pre-cluster claims by `(metric, dataset, model_base)` in Python before sending to LLM. Only send clusters of 2+ claims (from different papers) to the LLM to reduce token use.
+**Strategy:** Two-pass approach per cluster, using `agents/llm.py` (`call_llm_json`, `make_client`).
+
+1. **Synonym normalisation** — before clustering, metric/dataset/model strings are mapped through synonym tables (`_METRIC_SYNONYMS`, `_DATASET_SYNONYMS`, `_MODEL_SYNONYMS`) so "acc"/"accuracy"/"Accuracy", "sst2"/"sst-2"/"glue/sst-2", "llama-7b-hf"/"llama 7b"/"llama-7b" all land in the same cluster key.
+
+2. **Clustering** — group all claims by `(norm_metric, norm_dataset, norm_model_base)` using `defaultdict`. Discard any cluster where all claims belong to a single paper.
+
+3. **Pass 1 — heuristic numeric detection** (no LLM): for every cross-paper claim pair compute relative diff (`abs(va-vb)/max(|va|,|vb|,ε)`) and absolute diff. If `rel_diff ≥ 1%` or `abs_diff ≥ 0.5`, emit a `direct_numeric` `Contradiction`. Severity: `high` (≥5% rel or ≥2.0 abs), `medium` (≥1% rel or ≥0.5 abs), `low` (otherwise).
+
+4. **Pass 2 — LLM** (for `conditional_flip`, `dataset_scope`, and any numeric misses): send the cluster as JSON to the LLM. Results are validated against `valid_claim_ids` and deduplicated via a `seen_pairs` frozenset shared with Pass 1.
+
+5. **Large clusters (> 20 claims)**: `_batch_cluster()` selects the claim from the most-cited paper as pivot and returns pairwise batches (pivot vs. each other claim).
+
+6. **Graph serialisation**: after processing all clusters, the NetworkX `DiGraph` (nodes = claims, edges = contradictions with type/severity attributes) is saved to `settings.artifacts_dir / "claim_graph.json"` in NetworkX node-link format.
 
 **LLM Prompt:**
 ```
 system: |
   You are a scientific fact-checker comparing benchmark claims across multiple papers.
-  You will receive a cluster of claims that all report the same metric on the same 
-  dataset with the same base model, from different papers.
+  You will receive a cluster of claims that all report the same (or closely related)
+  metric on the same dataset with the same base model, from different papers.
 
-  Identify contradictions:
-  - direct_numeric: same setup, significantly different numeric values (>2% relative)
-  - conditional_flip: paper A says method X beats Y; paper B says Y beats X under 
+  Identify ALL contradictions, including:
+  - direct_numeric: same experimental setup, different numeric results (flag ANY
+    difference > 1% relative)
+  - conditional_flip: paper A says method X beats Y; paper B says Y beats X under
     conditions paper A did not disclose
-  - dataset_scope: papers use the same dataset name but different splits or versions
+  - dataset_scope: papers use the same dataset name but different splits, versions,
+    or evaluation protocols
 
-  For each contradiction provide:
-  - paper_a_id, paper_b_id, claim_a_id, claim_b_id
-  - contradiction_type
-  - description: concrete explanation of what conflicts
-  - severity: "high" | "medium" | "low"
+  Be inclusive rather than exclusive — flag every meaningful discrepancy.
+  For any numeric difference > 1% relative between claims from different papers,
+  report a contradiction.
 
-  If no contradiction exists in this cluster, return an empty array.
+  For each contradiction return an object:
+  {
+    "paper_a_id": "...", "paper_b_id": "...",
+    "claim_a_id": "...", "claim_b_id": "...",
+    "contradiction_type": "direct_numeric" | "conditional_flip" | "dataset_scope",
+    "description": "concrete explanation including the actual numeric values",
+    "severity": "high" | "medium" | "low"
+  }
+
+  Severity guide: high = >5% relative diff or rank flip; medium = 1–5% diff;
+  low = subtle discrepancy.
+
+  Return a JSON array. If claims are truly identical (same value, same conditions,
+  same paper), return [].
 
 user: |
   Metric: {metric}
@@ -1344,14 +1432,17 @@ user: |
   Claims from different papers:
   {claims_cluster_json}
 
-  Find contradictions.
+  Identify ALL contradictions between these claims.
 ```
 
 **Error handling:**
-- Cluster exceeds 20 claims: split into pairs vs. the best-cited paper; process pairwise
-- If only 1 paper in cluster: skip (no contradiction possible)
-- If LLM returns paper_ids not in input: discard, log `WARNING`
-- Empty corpus (no claims at all): return output with `contradictions_found=0`, log `INFO`
+- Cluster > 20 claims: `_batch_cluster()` picks the most-cited paper's claim as pivot; processes pairwise
+- Cluster with only 1 distinct paper: skipped — `_process()` checks `len(distinct_papers) < 2` before both passes
+- LLM returns hallucinated claim IDs: `_to_contradiction()` validates all IDs against `valid_claim_ids`; discards invalid and logs `WARNING "invalid_claim_ids_discarded"`
+- LLM call fails (any exception): logs `WARNING "contradiction_llm_failed"`, returns `[]` for that cluster — pipeline continues
+- Duplicate pair from both passes: `seen_pairs` frozenset deduplicates; second encounter is silently skipped
+- Empty corpus (no claims): returns `ContradictionMappingOutput(contradictions_found=0, ...)`, logs `INFO "empty_corpus_no_contradictions"`
+- Graph serialization fails: catches exception, logs `WARNING "graph_serialise_failed"`, does not abort
 
 ---
 
@@ -1678,15 +1769,16 @@ Step 6  Full run
 
 **File/module creation order** (dependency-safe):
 ```
-1. .env, config.py
-2. models.py
-3. db/schema.sql, db/init_db.py, db/queries.py
-4. tools/arxiv_tool.py
-5. tools/github_tool.py
-6. tools/pdf_tool.py
-7. agents/base_agent.py         (shared retry, logging, DB helpers)
-8. session/user_session.py      (interactive scoping; runs before pipeline)
-9. agents/paper_discovery.py
+1.  .env, config.py
+2.  models.py
+3.  db/schema.sql, db/init_db.py, db/queries.py
+4.  tools/arxiv_tool.py
+5.  tools/github_tool.py
+6.  tools/pdf_tool.py
+7.  agents/base_agent.py         (shared retry, logging, DB helpers)
+7b. agents/llm.py                (shared LLM client + JSON-retry helper)
+8.  session/user_session.py      (interactive scoping; runs before pipeline)
+9.  agents/paper_discovery.py
 10. agents/repo_resolution.py
 11. agents/claim_extraction.py
 12. agents/code_analysis.py
@@ -1695,6 +1787,7 @@ Step 6  Full run
 15. agents/report_generation.py
 16. templates/report.md.j2, templates/report.html.j2
 17. main.py
+17b. services.py                 (service layer — after agents, before MCP)
 18. tests/
 ```
 
@@ -1762,10 +1855,12 @@ lora-audit/
 ├── config.py                     # pydantic_settings config loader
 ├── models.py                     # all Pydantic data models
 ├── main.py                       # typer CLI entrypoint
+├── services.py                   # service layer (shared by LangGraph pipeline + MCP)
 ├── session/
 │   └── user_session.py               # interactive research scoping (pre-pipeline)
 ├── agents/
 │   ├── base_agent.py
+│   ├── llm.py                        # shared LLM client + JSON-retry helper
 │   ├── paper_discovery.py
 │   ├── repo_resolution.py
 │   ├── claim_extraction.py
@@ -2681,6 +2776,7 @@ Step 9  Deploy to Streamlit Community Cloud
 5.  tools/github_tool.py
 6.  tools/pdf_tool.py
 7.  agents/base_agent.py
+7b. agents/llm.py              (shared LLM helpers — build before any agent)
 8.  session/user_session.py
 9.  agents/paper_discovery.py
 10. agents/repo_resolution.py
@@ -2695,6 +2791,7 @@ Step 9  Deploy to Streamlit Community Cloud
 19. app/streamlit_app.py
 20. app/pages/01_Search.py … 05_Report.py
 21. main.py                    (LangGraph graph wires everything)
+21b. services.py               (service layer — build after agents, before MCP)
 22. .streamlit/config.toml
 23. requirements.txt, .env.example, .gitignore
 24. tests/conftest.py           (shared fixtures — build before any test file)
@@ -2924,9 +3021,9 @@ MCP_RATE_LIMIT_PER_MIN=60
 Append these steps after core pipeline implementation:
 
 ```
-MCP-1  Refactor shared pipeline logic into `services/`
+MCP-1  `services.py` (service layer) is already implemented — verify it covers all needed operations
 MCP-2  Implement `mcp_server/schemas.py`
-MCP-3  Implement `mcp_server/tools/*.py` handlers
+MCP-3  Implement `mcp_server/tools/*.py` handlers (thin: validate → call service → return)
 MCP-4  Add `pipeline_runs` and `mcp_tool_calls` schema + queries
 MCP-5  Add MCP integration tests (contract + e2e)
 MCP-6  Wire Streamlit backend toggle (`direct`/`mcp`)
